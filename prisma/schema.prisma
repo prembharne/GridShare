@@ -1,0 +1,214 @@
+// Prisma schema matching migrations/001_initial_schema.sql
+// Run: npx prisma generate && npx prisma db push
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  rider
+  host
+  admin
+  service
+}
+
+enum SessionStatus {
+  pending_payment
+  paid
+  escrow_lock_failed
+  active
+  stopping
+  settled
+  refunded_after_activation_failure
+}
+
+enum OutletStatus {
+  available
+  busy
+  offline
+  maintenance
+}
+
+enum HardwareCommandStatus {
+  issued
+  acknowledged
+  failed
+}
+
+enum OutboxStatus {
+  pending
+  processing
+  sent
+  failed
+}
+
+model User {
+  id           String   @id @default(uuid())
+  role         UserRole
+  phoneE164    String?  @unique
+  displayName  String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  riderSessions     Session[] @relation("RiderSessions")
+  hostSessions      Session[] @relation("HostSessions")
+  hostedOutlets     Outlet[]
+
+  @@map("users")
+}
+
+model Outlet {
+  id                String        @id @default(uuid())
+  hostId            String        @map("host_id")
+  displayName       String        @map("display_name")
+  deviceProvider    String        @default("tuya") @map("device_provider")
+  providerDeviceId  String        @unique @map("provider_device_id")
+  location          Unsupported("geography(Point, 4326)") @map("location")
+  address           String?
+  maxCurrentAmp     Decimal       @default(16) @db.Decimal(8, 3) @map("max_current_amp")
+  status            OutletStatus  @default(available)
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  host     User       @relation(fields: [hostId], references: [id])
+  sessions Session[]
+  commands HardwareCommand[]
+
+  @@index([location])
+  @@index([hostId])
+  @@map("outlets")
+}
+
+model Session {
+  id                      String        @id @default(uuid())
+  riderId                 String        @map("rider_id")
+  hostId                  String        @map("host_id")
+  outletId                String        @map("outlet_id")
+  status                  SessionStatus @default(pending_payment)
+  depositPaise            Int           @map("deposit_paise")
+  paymentId               String?       @unique @map("payment_id")
+  paidAt                  DateTime?     @map("paid_at")
+  escrowLockTxHash        String?       @map("escrow_lock_tx_hash")
+  hardwareOnCommandId     String?       @map("hardware_on_command_id")
+  hardwareOffCommandId    String?       @map("hardware_off_command_id")
+  activeAt                DateTime?     @map("active_at")
+  stoppedAt               DateTime?     @map("stopped_at")
+  stopReason              String?       @map("stop_reason")
+  stopKind                String?       @map("stop_kind")
+  pendingSettlement       Json?         @map("pending_settlement")
+  pendingOracleReport     Json?         @map("pending_oracle_report")
+  settlement              Json?
+  settlementTxHash        String?       @map("settlement_tx_hash")
+  refundTxHash            String?       @map("refund_tx_hash")
+  invoiceDescription      String?       @map("invoice_description")
+  failureCode             String?       @map("failure_code")
+  createdAt               DateTime      @default(now()) @map("created_at")
+  updatedAt               DateTime      @updatedAt @map("updated_at")
+
+  rider     User              @relation("RiderSessions", fields: [riderId], references: [id])
+  host      User              @relation("HostSessions", fields: [hostId], references: [id])
+  outlet    Outlet            @relation(fields: [outletId], references: [id])
+  telemetry TelemetrySample[]
+  commands  HardwareCommand[]
+
+  @@index([status])
+  @@index([outletId, status])
+  @@index([status], where: (status IN [paid, escrow_lock_failed, stopping]))
+  @@map("sessions")
+}
+
+model IdempotencyKey {
+  scope        String
+  key          String
+  payloadHash  String        @map("payload_hash")
+  responseJson Json          @map("response_json")
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  @@id([scope, key])
+  @@map("idempotency_keys")
+}
+
+model HardwareCommand {
+  id                   String                 @id @default(uuid())
+  sessionId            String?                @map("session_id")
+  outletId             String                 @map("outlet_id")
+  desiredState         Boolean                @map("desired_state")
+  reason               String
+  providerCommandId    String?                @map("provider_command_id")
+  status               HardwareCommandStatus  @default(issued)
+  issuedAt             DateTime               @default(now()) @map("issued_at")
+  acknowledgedAt       DateTime?              @map("acknowledged_at")
+  failureCode          String?                @map("failure_code")
+  rawProviderResponse  Json?                  @map("raw_provider_response")
+
+  session Session? @relation(fields: [sessionId], references: [id])
+  outlet  Outlet     @relation(fields: [outletId], references: [id])
+
+  @@index([sessionId])
+  @@index([outletId, issuedAt])
+  @@map("hardware_commands")
+}
+
+model TelemetrySample {
+  sessionId           String  @map("session_id")
+  outletId            String  @map("outlet_id")
+  sampledAt           DateTime @map("sampled_at")
+  receivedAt          DateTime @default(now()) @map("received_at")
+  energyWh            Decimal @db.Decimal(14, 3) @map("energy_wh")
+  currentAmp          Decimal @db.Decimal(10, 3) @map("current_amp")
+  voltageV            Decimal @db.Decimal(10, 3) @map("voltage_v")
+  tempC               Decimal @db.Decimal(10, 3) @map("temp_c")
+  rawProviderPayload  Json?   @map("raw_provider_payload")
+
+  session Session @relation(fields: [sessionId], references: [id])
+  outlet  Outlet  @relation(fields: [outletId], references: [id])
+
+  @@id([sessionId, sampledAt])
+  @@index([sessionId, sampledAt])
+  @@index([outletId, sampledAt])
+  @@map("telemetry_samples")
+}
+
+model LedgerEvent {
+  id        BigInt  @id @default(autoincrement())
+  eventType String  @map("event_type")
+  sessionId String? @map("session_id")
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([sessionId, id])
+  @@index([eventType, id])
+  @@map("ledger_events")
+}
+
+model OutboxEvent {
+  id            BigInt       @id @default(autoincrement())
+  eventType     String       @map("event_type")
+  sessionId     String?      @map("session_id")
+  payload       Json
+  status        OutboxStatus @default(pending)
+  attempts      Int          @default(0)
+  nextAttemptAt DateTime     @default(now()) @map("next_attempt_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  sentAt        DateTime?    @map("sent_at")
+
+  @@index([status, nextAttemptAt, id])
+  @@map("outbox_events")
+}
+
+model ReconciliationRun {
+  id        String   @id @default(uuid())
+  startedAt DateTime @default(now()) @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  scanned   Int      @default(0)
+  recovered Int      @default(0)
+  failed    Int      @default(0)
+  details   Json     @default("{}")
+
+  @@map("reconciliation_runs")
+}

@@ -1,0 +1,48 @@
+name: gridshare_mobile
+description: GridShare — DePIN EV charging. Premium 2.5D mobile UI (Flutter) for Android + iOS.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  cupertino_icons: ^1.0.6
+  flutter:
+    sdk: flutter
+  flutter_animate: ^4.5.2
+  flutter_map: ^8.3.1
+  flutter_riverpod: ^2.5.1
+  flutter_secure_storage: ^9.2.2
+  go_router: ^14.2.7
+  http: ^1.2.1
+  latlong2: ^0.10.1
+  rive: ^0.13.10
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
+  flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  # Custom fragment shaders (2.5D motion). Loaded via FragmentProgram.fromAsset.
+  shaders:
+    - lib/core/shaders/shaders/aurora.frag
+    - lib/core/shaders/shaders/ripple.frag
+    - lib/core/shaders/shaders/pulse.frag
+    - lib/core/shaders/shaders/spark.frag
+  # NOTE: Custom fonts (Clash Display / General Sans / Inter) and Rive .riv
+  # assets are added at production polish time. The app falls back gracefully
+  # to system fonts and a pure-Flutter animated hero if those binaries are absent.
+  assets:
+    - assets/rive/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/logo.png"
+  min_sdk_android: 21

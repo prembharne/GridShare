@@ -1,0 +1,28 @@
+{
+  "name": "gridshare-difficult-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Difficult-core implementation for GridShare: escrow saga, oracle settlement, telemetry, safety trip, and integration API.",
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node src/demo.js",
+    "test": "node --test",
+    "check:artifacts": "node scripts/check-production-artifacts.js",
+    "docs:bundle": "node scripts/sync-markdown-bundle.js",
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node scripts/seed.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.7.0",
+    "@stellar/stellar-sdk": "^12.1.0",
+    "axios": "^1.6.2",
+    "razorpay": "^2.9.2"
+  },
+  "devDependencies": {
+    "prisma": "^5.7.0"
+  }
+}

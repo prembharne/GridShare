@@ -1,0 +1,36 @@
+﻿services:
+  postgres:
+    image: timescale/timescaledb-postgis:latest-pg15
+    container_name: gridshare-postgres
+    environment:
+      POSTGRES_DB: gridshare
+      POSTGRES_USER: gridshare
+      POSTGRES_PASSWORD: gridshare_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - gridshare-postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gridshare -d gridshare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: gridshare-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - gridshare-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gridshare-postgres-data:
+  gridshare-redis-data:
