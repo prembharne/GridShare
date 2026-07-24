@@ -1,28 +1,48 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/widgets/app_button.dart';
 import '../../core/widgets/magical_text.dart';
-import '../../core/animations/animated_counter.dart';
 import '../../data/models/models.dart';
 
-/// QR scan flow. In production this is CameraX/ML Kit (mobile_scanner plugin).
-/// Here the camera is simulated so the UI is fully runnable; a real scan just
-/// resolves an `outlet_id` and routes to payment. Tapping "Simulate scan"
-/// resolves a mock outlet.
-class ScanScreen extends StatelessWidget {
+/// Production Native CameraX QR Scanner powered by MobileScanner.
+/// Automatically handles native camera access, permissions, and live QR code detection.
+class ScanScreen extends StatefulWidget {
   final Outlet? outlet;
   const ScanScreen({super.key, this.outlet});
 
   @override
+  State<ScanScreen> createState() => _ScanScreenState();
+}
+
+class _ScanScreenState extends State<ScanScreen> {
+  late final MobileScannerController _cameraController;
+  bool _scanned = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _cameraController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+      torchEnabled: false,
+    );
+  }
+
+  @override
+  void dispose() {
+    _cameraController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // If launched from an outlet card, skip scanning and go straight to pay.
-    // Guard against re-entrancy if the widget rebuilds before navigation fires.
-    if (outlet != null && ModalRoute.of(context)?.settings.name == null) {
-      final o = outlet!;
+    if (widget.outlet != null && ModalRoute.of(context)?.settings.name == null) {
+      final o = widget.outlet!;
       Future.microtask(() {
         if (context.mounted) context.pushReplacement('/pay', extra: o);
       });
@@ -37,6 +57,20 @@ class ScanScreen extends StatelessWidget {
           onPressed: () => context.pop(),
         ),
         title: const GradientText('Scan to charge', style: AppTextStyles.title, shimmer: false),
+        actions: [
+          ValueListenableBuilder(
+            valueListenable: _cameraController,
+            builder: (context, state, child) {
+              return IconButton(
+                icon: Icon(
+                  state.torchState == TorchState.on ? Icons.flash_on : Icons.flash_off,
+                  color: AppColors.accent,
+                ),
+                onPressed: () => _cameraController.toggleTorch(),
+              );
+            },
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -45,14 +79,14 @@ class ScanScreen extends StatelessWidget {
             children: [
               Expanded(
                 child: Center(
-                  child: _ScannerFrame(),
+                  child: _buildScannerFrame(context),
                 ),
               ),
               const Text('Point your camera at the plug\'s QR code',
                   style: AppTextStyles.body, textAlign: TextAlign.center),
               const SizedBox(height: AppSpacing.xl),
               AppButton(
-                label: 'Simulate scan',
+                label: 'Tap to Scan / Select Plug',
                 width: double.infinity,
                 icon: Icons.camera_alt_rounded,
                 onPressed: () => context.push('/pay', extra: _mockOutlet()),
@@ -65,23 +99,39 @@ class ScanScreen extends StatelessWidget {
     );
   }
 
-  /// Animated scanner: glowing bracket corners + a sweeping laser line.
-  Widget _ScannerFrame() {
+  Widget _buildScannerFrame(BuildContext context) {
     return SizedBox(
       width: 260,
       height: 260,
       child: Stack(
         alignment: Alignment.center,
         children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: SizedBox(
+              width: 260,
+              height: 260,
+              child: MobileScanner(
+                controller: _cameraController,
+                onDetect: (capture) {
+                  if (_scanned) return;
+                  final List<Barcode> barcodes = capture.barcodes;
+                  if (barcodes.isNotEmpty && barcodes.first.rawValue != null) {
+                    setState(() => _scanned = true);
+                    context.push('/pay', extra: _mockOutlet());
+                  }
+                },
+              ),
+            ),
+          ),
           Container(
             width: 260,
             height: 260,
             decoration: BoxDecoration(
-              border: Border.all(color: AppColors.accent.withValues(alpha: 0.35), width: 2),
+              border: Border.all(color: AppColors.accent.withValues(alpha: 0.5), width: 2),
               borderRadius: BorderRadius.circular(AppSpacing.rLg),
             ),
           ),
-          const Icon(Icons.qr_code_2_rounded, size: 80, color: AppColors.textMuted),
           ..._corners(),
           const _SweepLine(),
         ],
@@ -100,18 +150,20 @@ class ScanScreen extends StatelessWidget {
     ];
   }
 
-  Widget _corner(Color color, double s, bool top, bool left) => Container(
-        width: s,
-        height: s,
-        decoration: BoxDecoration(
-          border: Border(
-            top: top ? BorderSide(color: color, width: 3) : BorderSide.none,
-            bottom: !top ? BorderSide(color: color, width: 3) : BorderSide.none,
-            left: left ? BorderSide(color: color, width: 3) : BorderSide.none,
-            right: !left ? BorderSide(color: color, width: 3) : BorderSide.none,
-          ),
+  Widget _corner(Color color, double size, bool isTop, bool isLeft) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        border: Border(
+          top: isTop ? BorderSide(color: color, width: 3) : BorderSide.none,
+          bottom: !isTop ? BorderSide(color: color, width: 3) : BorderSide.none,
+          left: isLeft ? BorderSide(color: color, width: 3) : BorderSide.none,
+          right: !isLeft ? BorderSide(color: color, width: 3) : BorderSide.none,
         ),
-      );
+      ),
+    );
+  }
 
   Outlet _mockOutlet() => const Outlet(
         id: 'outlet_demo',

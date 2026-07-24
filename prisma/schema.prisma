@@ -1,4 +1,4 @@
-// Prisma schema matching migrations/001_initial_schema.sql
+// Prisma schema for GridShare. Credits model (1 credit = 1 INR).
 // Run: npx prisma generate && npx prisma db push
 
 generator client {
@@ -18,9 +18,9 @@ enum UserRole {
 }
 
 enum SessionStatus {
-  pending_payment
-  paid
-  escrow_lock_failed
+  created
+  confirmed
+  lock_failed
   active
   stopping
   settled
@@ -45,6 +45,18 @@ enum OutboxStatus {
   processing
   sent
   failed
+}
+
+enum WalletTopUpStatus {
+  pending
+  confirmed
+  failed
+}
+
+enum HostPayoutStatus {
+  pending
+  paid
+  burned
 }
 
 model User {
@@ -75,9 +87,10 @@ model Outlet {
   createdAt         DateTime      @default(now()) @map("created_at")
   updatedAt         DateTime      @updatedAt @map("updated_at")
 
-  host     User       @relation(fields: [hostId], references: [id])
-  sessions Session[]
-  commands HardwareCommand[]
+  host      User              @relation(fields: [hostId], references: [id])
+  sessions  Session[]
+  commands  HardwareCommand[]
+  telemetry TelemetrySample[]
 
   @@index([location])
   @@index([hostId])
@@ -89,8 +102,8 @@ model Session {
   riderId                 String        @map("rider_id")
   hostId                  String        @map("host_id")
   outletId                String        @map("outlet_id")
-  status                  SessionStatus @default(pending_payment)
-  depositPaise            Int           @map("deposit_paise")
+  status                  SessionStatus @default(created)
+  depositCredits          Int           @map("deposit_credits")
   paymentId               String?       @unique @map("payment_id")
   paidAt                  DateTime?     @map("paid_at")
   escrowLockTxHash        String?       @map("escrow_lock_tx_hash")
@@ -118,8 +131,51 @@ model Session {
 
   @@index([status])
   @@index([outletId, status])
-  @@index([status], where: (status IN [paid, escrow_lock_failed, stopping]))
   @@map("sessions")
+}
+
+// Local mirror of a user's on-chain credit balance. The chain relayer is the
+// source of truth for balances; this row lets the admin dashboard and queries
+// read balances without a chain round-trip.
+model WalletBalance {
+  userId         String   @id @map("user_id")
+  balanceCredits Int      @default(0) @map("balance_credits")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("wallet_balances")
+}
+
+// A wallet top-up (credits minted after a payment). Keyed by the paymentId so
+// top-ups are idempotent on the payment reference.
+model WalletTopUp {
+  id            String            @id
+  userId        String            @map("user_id")
+  amountCredits Int               @map("amount_credits")
+  paymentId     String            @unique @map("payment_id")
+  status        WalletTopUpStatus @default(pending)
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  @@index([userId, createdAt])
+  @@map("wallet_topups")
+}
+
+// A host off-ramp payout. Credits are burned on-chain, INR paid off-chain.
+model HostPayout {
+  id          String           @id
+  hostId      String           @map("host_id")
+  credits     Int
+  inrAmount   Int              @map("inr_amount")
+  method      String
+  reference   String?
+  status      HostPayoutStatus @default(pending)
+  periodStart DateTime?        @map("period_start")
+  periodEnd   DateTime?        @map("period_end")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  paidAt      DateTime?        @map("paid_at")
+
+  @@index([hostId, createdAt])
+  @@map("host_payouts")
 }
 
 model IdempotencyKey {

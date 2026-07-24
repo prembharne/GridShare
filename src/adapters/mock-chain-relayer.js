@@ -14,7 +14,7 @@ export class MockChainRelayer {
     this.failNextSettleCount = 0;
     this.failNextRefundCount = 0;
     this.balances = new Map();  // userId -> balanceCredits
-    this.totalSupply = 0;
+    this._totalSupply = 0;  // backing field; totalSupply() is the accessor
   }
 
   simulateNextLockFailure(count = 1) {
@@ -36,7 +36,7 @@ export class MockChainRelayer {
     }
     const current = this.balances.get(userId) ?? 0;
     this.balances.set(userId, current + amountCredits);
-    this.totalSupply += amountCredits;
+    this._totalSupply += amountCredits;
 
     const result = {
       txHash: fakeTxHash("mint", { userId, amountCredits }),
@@ -54,7 +54,7 @@ export class MockChainRelayer {
   }
 
   async totalSupply() {
-    return this.totalSupply;
+    return this._totalSupply;
   }
 
   async redeem({ hostId, amountCredits }) {
@@ -66,7 +66,7 @@ export class MockChainRelayer {
       throw new DomainError("INSUFFICIENT_BALANCE", "Insufficient balance for redeem.", { hostId, amountCredits, current });
     }
     this.balances.set(hostId, current - amountCredits);
-    this.totalSupply -= amountCredits;
+    this._totalSupply -= amountCredits;
 
     const result = {
       txHash: fakeTxHash("redeem", { hostId, amountCredits }),
@@ -236,7 +236,7 @@ export class MockChainRelayer {
   async mint({ userId, amountCredits }) {
     const existing = this.balances.get(userId) ?? 0;
     this.balances.set(userId, existing + amountCredits);
-    this.totalSupply = (this.totalSupply ?? 0) + amountCredits;
+    this._totalSupply = (this._totalSupply ?? 0) + amountCredits;
     this.eventBus?.publish("chain.wallet_minted", { userId, amountCredits });
     return { userId, amountCredits, txHash: fakeTxHash("mint", { userId, amountCredits }), ledger: ++this.ledger };
   }
@@ -251,12 +251,12 @@ export class MockChainRelayer {
       throw new DomainError("INSUFFICIENT_BALANCE", "Insufficient balance for redeem.", { hostId });
     }
     this.balances.set(hostId, existing - amountCredits);
-    this.totalSupply = (this.totalSupply ?? 0) - amountCredits;
+    this._totalSupply = (this._totalSupply ?? 0) - amountCredits;
     this.eventBus?.publish("chain.wallet_redeemed", { hostId, amountCredits });
     return { hostId, amountCredits, txHash: fakeTxHash("redeem", { hostId, amountCredits }), ledger: ++this.ledger };
   }
 
   async totalSupply() {
-    return this.totalSupply ?? 0;
+    return this._totalSupply ?? 0;
   }
 }

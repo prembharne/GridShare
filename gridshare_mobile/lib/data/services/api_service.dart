@@ -1,12 +1,15 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import '../models/models.dart';
 
-/// Base URL for the GridShare backend API.
-/// Override via `--dart-define=API_BASE_URL=https://your-backend.example.com`
-/// Default points to Android emulator localhost (10.0.2.2:3000).
-const String _defaultBaseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: 'http://10.0.2.2:3000');
+String get _defaultBaseUrl {
+  const envUrl = String.fromEnvironment('API_BASE_URL');
+  if (envUrl.isNotEmpty) return envUrl;
+  return 'http://172.28.159.86:8080';
+}
 
 /// Centralised HTTP client with auth, idempotency keys, and error mapping.
 class ApiService {
@@ -44,8 +47,13 @@ class ApiService {
     }
     final body = res.body.isNotEmpty ? jsonDecode(res.body) : {};
     final code = body['error']?['code'] ?? 'HTTP_${res.statusCode}';
-    final msg = body['error']?['message'] ?? res.reasonPhrase ?? 'Request failed';
-    throw ApiException(code: code, message: msg, statusCode: res.statusCode, details: body['error']?['details']);
+    final msg =
+        body['error']?['message'] ?? res.reasonPhrase ?? 'Request failed';
+    throw ApiException(
+        code: code,
+        message: msg,
+        statusCode: res.statusCode,
+        details: body['error']?['details']);
   }
 
   // ============================ AUTH ============================
@@ -79,6 +87,50 @@ class ApiService {
 
   // ============================ WALLET ============================
 
+  /// POST /wallet/topup/instamojo — Create Instamojo payment request for UPI top-up.
+  Future<InstamojoOrder> createInstamojoOrder({
+    required int amountCredits,
+    required String userId,
+    String? phone,
+    String? name,
+    String? email,
+  }) async {
+    final res = await _client.post(
+      Uri.parse('$_baseUrl/wallet/topup/instamojo'),
+      headers: _headers(),
+      body: jsonEncode({
+        'userId': userId,
+        'amountCredits': amountCredits,
+        'phone': phone ?? '',
+        'name': name ?? '',
+        'email': email ?? '',
+      }),
+    );
+    final data = _check(res);
+    return InstamojoOrder.fromJson(data['data'] as Map<String, dynamic>);
+  }
+
+  /// POST /wallet/topup/instamojo/verify — Verify Instamojo payment and mint credits.
+  Future<bool> verifyInstamojoPayment({
+    required String paymentRequestId,
+    required String paymentId,
+    required String userId,
+    required int amountCredits,
+  }) async {
+    final res = await _client.post(
+      Uri.parse('$_baseUrl/wallet/topup/instamojo/verify'),
+      headers: _headers(),
+      body: jsonEncode({
+        'paymentRequestId': paymentRequestId,
+        'paymentId': paymentId,
+        'userId': userId,
+        'amountCredits': amountCredits,
+      }),
+    );
+    final data = _check(res);
+    return data['data']?['verified'] == true;
+  }
+
   /// POST /wallet/topup — Create a Razorpay order for UPI top-up.
   /// Returns { orderId, amountCredits, currency: 'INR', keyId } for Razorpay checkout.
   Future<TopUpOrder> createTopUpOrder({
@@ -100,7 +152,119 @@ class ApiService {
       Uri.parse('$_baseUrl/wallet/$userId/balance'),
       headers: _headers(),
     );
-    return WalletBalance.fromJson(_check(res));
+    final body = _check(res);
+    // Backend wraps response in { ok: true, data: { userId, balanceCredits } }
+    final data = (body['data'] as Map<String, dynamic>?) ?? body as Map<String, dynamic>;
+    return WalletBalance.fromJson(data);
+  }
+
+  /// GET /fx/usd-inr — Live USD→INR exchange rate (cached on backend).
+  Future<FxRate> getFxRate() async {
+    final res = await _client.get(
+      Uri.parse('$_baseUrl/fx/usd-inr'),
+      headers: _headers(),
+    );
+    final data = _check(res);
+    return FxRate.fromJson(data['data'] as Map<String, dynamic>);
+  }
+
+  /// POST /wallet/topup/usdc — Create a USDC deposit intent.
+  /// Returns memo + deposit address + SEP-0007 QR URI.
+  Future<UsdcIntent> createUsdcIntent({
+    required String userId,
+    required int amountCredits,
+    String assetCode = 'XLM',
+  }) async {
+    final urls = [
+      '$_baseUrl/wallet/topup/usdc',
+      if (!_baseUrl.contains('localhost')) 'http://localhost:8080/wallet/topup/usdc',
+      if (!_baseUrl.contains('10.0.2.2')) 'http://10.0.2.2:8080/wallet/topup/usdc',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(),
+              body: jsonEncode({
+                'userId': userId,
+                'amountCredits': amountCredits,
+                'assetCode': assetCode,
+              }),
+            )
+            .timeout(const Duration(seconds: 4));
+        final data = _check(res);
+        return UsdcIntent.fromJson(data['data'] as Map<String, dynamic>);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed to connect to backend server.');
+  }
+
+  /// GET /wallet/topup/usdc/:memo — Poll intent status (pending → confirmed).
+  Future<UsdcIntentStatus> pollUsdcIntent({required String memo}) async {
+    final urls = [
+      '$_baseUrl/wallet/topup/usdc/$memo',
+      if (!_baseUrl.contains('localhost')) 'http://localhost:8080/wallet/topup/usdc/$memo',
+      if (!_baseUrl.contains('10.0.2.2')) 'http://10.0.2.2:8080/wallet/topup/usdc/$memo',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .get(
+              Uri.parse(urlStr),
+              headers: _headers(),
+            )
+            .timeout(const Duration(seconds: 15));
+        final data = _check(res);
+        return UsdcIntentStatus.fromJson(data['data'] as Map<String, dynamic>);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed to poll USDC intent status.');
+  }
+
+  /// POST /wallet/topup/usdc/:memo/verify — Actively verify & confirm USDC payment.
+  /// NOTE: Horizon testnet can take 8-15s to respond, so timeout is 30s.
+  Future<UsdcIntentStatus> verifyUsdcIntent({required String memo}) async {
+    final urls = [
+      '$_baseUrl/wallet/topup/usdc/$memo/verify',
+      if (!_baseUrl.contains('localhost')) 'http://localhost:8080/wallet/topup/usdc/$memo/verify',
+      if (!_baseUrl.contains('10.0.2.2')) 'http://10.0.2.2:8080/wallet/topup/usdc/$memo/verify',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(),
+            )
+            .timeout(const Duration(seconds: 30));
+        final data = _check(res);
+        return UsdcIntentStatus.fromJson(data['data'] as Map<String, dynamic>);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed to verify USDC payment.');
+  }
+
+  /// GET /wallet/:userId/source-ledger — UPI vs USDC earnings buckets.
+  Future<HostSourceLedger> getSourceLedger({required String userId}) async {
+    final res = await _client.get(
+      Uri.parse('$_baseUrl/wallet/$userId/source-ledger'),
+      headers: _headers(),
+    );
+    final data = _check(res);
+    return HostSourceLedger.fromJson(data['data'] as Map<String, dynamic>);
   }
 
   // ============================ SESSIONS ============================
@@ -204,11 +368,59 @@ class ApiService {
     double radiusKm = 10,
   }) async {
     final uri = Uri.parse('$_baseUrl/outlets/nearby').replace(
-      queryParameters: {'lat': lat.toString(), 'lng': lng.toString(), 'radiusKm': radiusKm.toString()},
+      queryParameters: {
+        'lat': lat.toString(),
+        'lng': lng.toString(),
+        'radiusKm': radiusKm.toString()
+      },
     );
     final res = await _client.get(uri, headers: _headers());
     final data = _check(res);
     return (data['outlets'] as List).map((e) => Outlet.fromJson(e)).toList();
+  }
+
+  /// POST /outlets — Register dynamic IoT Smart Plug charger from mobile app.
+  Future<Outlet> addOutlet({
+    required String name,
+    required String providerDeviceId,
+    required double ratePerKwh,
+    String? address,
+    String? connectorType,
+    double? lat,
+    double? lng,
+  }) async {
+    final urls = [
+      '$_baseUrl/outlets',
+      if (!_baseUrl.contains('localhost:3000')) 'http://localhost:3000/outlets',
+      if (!_baseUrl.contains('10.0.2.2:3000')) 'http://10.0.2.2:3000/outlets',
+      if (!_baseUrl.contains('localhost:8080')) 'http://localhost:8080/outlets',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(),
+              body: jsonEncode({
+                'name': name,
+                'providerDeviceId': providerDeviceId,
+                'ratePerKwh': ratePerKwh,
+                'address': address ?? 'Host Registered Station',
+                'connectorType': connectorType ?? '16A Socket',
+                'lat': lat ?? 19.0760,
+                'lng': lng ?? 72.8777,
+              }),
+            )
+            .timeout(const Duration(seconds: 10));
+        final data = _check(res);
+        return Outlet.fromJson(data['data']['outlet'] as Map<String, dynamic>);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed to register smart plug outlet.');
   }
 
   // ============================ ADMIN / HOST ============================
@@ -220,7 +432,9 @@ class ApiService {
       headers: _headers(),
     );
     final data = _check(res);
-    return (data['hosts'] as List).map((e) => HostEarnings.fromJson(e)).toList();
+    return (data['hosts'] as List)
+        .map((e) => HostEarnings.fromJson(e))
+        .toList();
   }
 
   /// POST /admin/hosts/:id/payout — Create pending payout row (credits snapshotted).
@@ -274,7 +488,11 @@ class ApiException implements Exception {
   final int statusCode;
   final Map<String, dynamic>? details;
 
-  const ApiException({required this.code, required this.message, required this.statusCode, this.details});
+  const ApiException(
+      {required this.code,
+      required this.message,
+      required this.statusCode,
+      this.details});
 
   @override
   String toString() => 'ApiException($code): $message';
@@ -289,12 +507,19 @@ class AuthResponse {
   final bool otpSent;
   final String? message;
 
-  AuthResponse({this.accessToken, this.refreshToken, this.user, this.otpSent = false, this.message});
+  AuthResponse(
+      {this.accessToken,
+      this.refreshToken,
+      this.user,
+      this.otpSent = false,
+      this.message});
 
   factory AuthResponse.fromJson(Map<String, dynamic> j) => AuthResponse(
         accessToken: j['accessToken'] as String?,
         refreshToken: j['refreshToken'] as String?,
-        user: j['user'] != null ? User.fromJson(j['user'] as Map<String, dynamic>) : null,
+        user: j['user'] != null
+            ? User.fromJson(j['user'] as Map<String, dynamic>)
+            : null,
         otpSent: j['otpSent'] as bool? ?? false,
         message: j['message'] as String?,
       );
@@ -306,7 +531,11 @@ class TopUpOrder {
   final String currency;
   final String keyId; // Razorpay key_id for checkout
 
-  TopUpOrder({required this.orderId, required this.amountCredits, required this.currency, required this.keyId});
+  TopUpOrder(
+      {required this.orderId,
+      required this.amountCredits,
+      required this.currency,
+      required this.keyId});
 
   factory TopUpOrder.fromJson(Map<String, dynamic> j) => TopUpOrder(
         orderId: j['orderId'] as String,
@@ -333,12 +562,15 @@ class SessionStartResponse {
   final Map<String, dynamic> chain;
   final HardwareCommand hardware;
 
-  const SessionStartResponse({required this.session, required this.chain, required this.hardware});
+  const SessionStartResponse(
+      {required this.session, required this.chain, required this.hardware});
 
-  factory SessionStartResponse.fromJson(Map<String, dynamic> j) => SessionStartResponse(
+  factory SessionStartResponse.fromJson(Map<String, dynamic> j) =>
+      SessionStartResponse(
         session: Session.fromJson(j['session'] as Map<String, dynamic>),
         chain: j['chain'] as Map<String, dynamic>,
-        hardware: HardwareCommand.fromJson(j['hardware'] as Map<String, dynamic>),
+        hardware:
+            HardwareCommand.fromJson(j['hardware'] as Map<String, dynamic>),
       );
 }
 
@@ -363,7 +595,8 @@ class TelemetryResult {
         session: Session.fromJson(j['session'] as Map<String, dynamic>),
         telemetry: Telemetry.fromJson(j['telemetry'] as Map<String, dynamic>),
         settlementPreview: j['settlementPreview'] != null
-            ? SettlementPreview.fromJson(j['settlementPreview'] as Map<String, dynamic>)
+            ? SettlementPreview.fromJson(
+                j['settlementPreview'] as Map<String, dynamic>)
             : null,
         safetyTripped: j['safetyTripped'] as bool? ?? false,
         safetyReason: j['safetyReason'] as String?,
@@ -388,7 +621,8 @@ class SettlementPreview {
     required this.depositCredits,
   });
 
-  factory SettlementPreview.fromJson(Map<String, dynamic> j) => SettlementPreview(
+  factory SettlementPreview.fromJson(Map<String, dynamic> j) =>
+      SettlementPreview(
         energyWh: (j['energyWh'] as num).toInt(),
         amountDueCredits: (j['amountDueCredits'] as num).toInt(),
         hostShareCredits: (j['hostShareCredits'] as num).toInt(),
@@ -415,12 +649,20 @@ class SessionStopResponse {
     this.hardware,
   });
 
-  factory SessionStopResponse.fromJson(Map<String, dynamic> j) => SessionStopResponse(
+  factory SessionStopResponse.fromJson(Map<String, dynamic> j) =>
+      SessionStopResponse(
         session: Session.fromJson(j['session'] as Map<String, dynamic>),
-        telemetry: j['telemetry'] != null ? Telemetry.fromJson(j['telemetry'] as Map<String, dynamic>) : null,
-        settlement: j['settlement'] != null ? SettlementPreview.fromJson(j['settlement'] as Map<String, dynamic>) : null,
+        telemetry: j['telemetry'] != null
+            ? Telemetry.fromJson(j['telemetry'] as Map<String, dynamic>)
+            : null,
+        settlement: j['settlement'] != null
+            ? SettlementPreview.fromJson(
+                j['settlement'] as Map<String, dynamic>)
+            : null,
         chain: j['chain'] as Map<String, dynamic>,
-        hardware: j['hardware'] != null ? HardwareCommand.fromJson(j['hardware'] as Map<String, dynamic>) : null,
+        hardware: j['hardware'] != null
+            ? HardwareCommand.fromJson(j['hardware'] as Map<String, dynamic>)
+            : null,
       );
 }
 
@@ -441,12 +683,16 @@ class SessionAudit {
 
   factory SessionAudit.fromJson(Map<String, dynamic> j) => SessionAudit(
         session: Session.fromJson(j['session'] as Map<String, dynamic>),
-        telemetry: (j['telemetry'] as List).map((e) => Telemetry.fromJson(e as Map<String, dynamic>)).toList(),
+        telemetry: (j['telemetry'] as List)
+            .map((e) => Telemetry.fromJson(e as Map<String, dynamic>))
+            .toList(),
         contract: j['contract'] as Map<String, dynamic>?,
         hardwareCommands: (j['hardwareCommands'] as List? ?? [])
             .map((e) => HardwareCommand.fromJson(e as Map<String, dynamic>))
             .toList(),
-        events: (j['events'] as List? ?? []).map((e) => e as Map<String, dynamic>).toList(),
+        events: (j['events'] as List? ?? [])
+            .map((e) => e as Map<String, dynamic>)
+            .toList(),
       );
 }
 
@@ -530,10 +776,15 @@ class HostPayout {
         method: j['method'] as String,
         reference: j['reference'] as String?,
         status: j['status'] as String,
-        periodStart: j['periodStart'] != null ? DateTime.parse(j['periodStart'] as String) : null,
-        periodEnd: j['periodEnd'] != null ? DateTime.parse(j['periodEnd'] as String) : null,
+        periodStart: j['periodStart'] != null
+            ? DateTime.parse(j['periodStart'] as String)
+            : null,
+        periodEnd: j['periodEnd'] != null
+            ? DateTime.parse(j['periodEnd'] as String)
+            : null,
         createdAt: DateTime.parse(j['createdAt'] as String),
-        paidAt: j['paidAt'] != null ? DateTime.parse(j['paidAt'] as String) : null,
+        paidAt:
+            j['paidAt'] != null ? DateTime.parse(j['paidAt'] as String) : null,
       );
 }
 
@@ -544,7 +795,134 @@ class BalanceResponse {
   const BalanceResponse({required this.userId, required this.balanceCredits});
 
   factory BalanceResponse.fromJson(Map<String, dynamic> j) => BalanceResponse(
-        userId: j['userId'] as String,
-        balanceCredits: (j['balanceCredits'] as num).toInt(),
+        userId: j['userId'] as String? ?? '',
+        balanceCredits: (j['balanceCredits'] as num?)?.toInt() ?? 0,
+      );
+}
+
+// ── USDC top-up models ─────────────────────────────────────────────────────
+
+/// Live USD→INR rate returned by GET /fx/usd-inr.
+class FxRate {
+  final double rate;
+  final String source; // 'live' | 'cache' | 'stale-cache' | 'fallback'
+  final String? fetchedAt;
+
+  const FxRate({required this.rate, required this.source, this.fetchedAt});
+
+  factory FxRate.fromJson(Map<String, dynamic> j) => FxRate(
+        rate: (j['rate'] as num?)?.toDouble() ?? 95.0,
+        source: j['source'] as String? ?? 'live',
+        fetchedAt: j['fetchedAt'] as String?,
+      );
+}
+
+/// USDC deposit intent returned by POST /wallet/topup/usdc.
+class UsdcIntent {
+  final String memo;
+  final String depositAddress;
+  final String assetCode;
+  final String assetIssuer;
+  final String assetType;
+  final double expectedUsdc;
+  final int amountCredits;
+  final double lockedRate;
+  final String qrUri; // SEP-0007 web+stellar:pay URI
+  final int expiresInSeconds;
+
+  const UsdcIntent({
+    required this.memo,
+    required this.depositAddress,
+    required this.assetCode,
+    required this.assetIssuer,
+    required this.assetType,
+    required this.expectedUsdc,
+    required this.amountCredits,
+    required this.lockedRate,
+    required this.qrUri,
+    required this.expiresInSeconds,
+  });
+
+  factory UsdcIntent.fromJson(Map<String, dynamic> j) => UsdcIntent(
+        memo: j['memo'] as String? ?? '',
+        depositAddress: j['depositAddress'] as String? ?? '',
+        assetCode: j['assetCode'] as String? ?? 'USDC',
+        assetIssuer: j['assetIssuer'] as String? ?? '',
+        assetType: j['assetType'] as String? ?? 'credit_alphanum4',
+        expectedUsdc: (j['expectedUsdc'] as num?)?.toDouble() ?? 0,
+        amountCredits: (j['amountCredits'] as num?)?.toInt() ?? 0,
+        lockedRate: (j['lockedRate'] as num?)?.toDouble() ?? 95,
+        qrUri: j['qrUri'] as String? ?? j['depositAddress'] as String? ?? '',
+        expiresInSeconds: (j['expiresInSeconds'] as num?)?.toInt() ?? 900,
+      );
+}
+
+/// Polled intent status returned by GET /wallet/topup/usdc/:memo.
+class UsdcIntentStatus {
+  final String memo;
+  final String status; // 'pending' | 'confirmed' | 'expired'
+  final int amountCredits;
+  final double expectedUsdc;
+  final String assetCode;
+  final String? txHash;
+
+  const UsdcIntentStatus({
+    required this.memo,
+    required this.status,
+    required this.amountCredits,
+    required this.expectedUsdc,
+    required this.assetCode,
+    this.txHash,
+  });
+
+  factory UsdcIntentStatus.fromJson(Map<String, dynamic> j) => UsdcIntentStatus(
+        memo: j['memo'] as String? ?? '',
+        status: j['status'] as String? ?? 'pending',
+        amountCredits: (j['amountCredits'] as num?)?.toInt() ?? 0,
+        expectedUsdc: (j['expectedUsdc'] as num?)?.toDouble() ?? 0,
+        assetCode: j['assetCode'] as String? ?? 'USDC',
+        txHash: j['txHash'] as String?,
+      );
+
+  bool get isConfirmed => status == 'confirmed';
+  bool get isExpired => status == 'expired';
+}
+
+/// Source ledger buckets for a user — UPI vs USDC earnings.
+class HostSourceLedger {
+  final String userId;
+  final int upi;
+  final int usdc;
+
+  const HostSourceLedger({
+    required this.userId,
+    required this.upi,
+    required this.usdc,
+  });
+
+  factory HostSourceLedger.fromJson(Map<String, dynamic> j) => HostSourceLedger(
+        userId: j['userId'] as String? ?? '',
+        upi: (j['upi'] as num?)?.toInt() ?? 0,
+        usdc: (j['usdc'] as num?)?.toInt() ?? 0,
+      );
+
+  int get total => upi + usdc;
+}
+
+class InstamojoOrder {
+  final String paymentUrl;
+  final String requestId;
+  final int amountCredits;
+
+  const InstamojoOrder({
+    required this.paymentUrl,
+    required this.requestId,
+    required this.amountCredits,
+  });
+
+  factory InstamojoOrder.fromJson(Map<String, dynamic> j) => InstamojoOrder(
+        paymentUrl: j['paymentUrl'] as String? ?? '',
+        requestId: j['requestId'] as String? ?? '',
+        amountCredits: (j['amountCredits'] as num?)?.toInt() ?? 0,
       );
 }

@@ -4,10 +4,11 @@ import {
   Keypair,
   Networks,
   Operation,
-  SorobanRpc,
+  rpc,
   TransactionBuilder,
   xdr,
   nativeToScVal,
+  scValToNative,
   BASE_FEE,
 } from "@stellar/stellar-sdk";
 import crypto from "node:crypto";
@@ -36,7 +37,7 @@ export class RealChainRelayer {
     tokenAddress,               // optional, accepted for backward compat but unused
     tokenUnitsPerPaise,         // optional, accepted for backward compat but unused
     pricePerKwhCredits = 1800,  // credits per 1000 Wh (whole credits)
-    serviceFeeBps = 300,        // 2-3% service fee in basis points (default 3%)
+    serviceFeeBps = 125,        // 1.25% service fee in basis points (default 1.25%)
     resolveAddress,
     getSession,
     eventBus,
@@ -58,7 +59,7 @@ export class RealChainRelayer {
     this.resolveAddress = resolveAddress ?? ((id) => { throw new DomainError("ADDRESS_UNRESOLVED", `No address mapping for ${id}.`); });
     this.getSession = getSession ?? (() => null);
     this.eventBus = eventBus;
-    this.server = new SorobanRpc.Server(this.rpcUrl, { allowHttp: true });
+    this.server = new rpc.Server(this.rpcUrl, { allowHttp: true });
     this.contractSessions = new Map();
   }
 
@@ -76,10 +77,17 @@ export class RealChainRelayer {
     return nativeToScVal(s, { type: "symbol" });
   }
 
-  addressVal(addrOrId) {
-    const addr = typeof addrOrId === "string" && addrOrId.startsWith("G")
+  async resolveAddressVal(addrOrId) {
+    const addr = (typeof addrOrId === "string" && addrOrId.startsWith("G") && addrOrId.length === 56)
       ? addrOrId
-      : this.resolveAddress(addrOrId);
+      : await this.resolveAddress(addrOrId);
+    return new Address(addr).toScVal();
+  }
+
+  addressVal(addrOrId) {
+    const addr = (typeof addrOrId === "string" && addrOrId.startsWith("G") && addrOrId.length === 56)
+      ? addrOrId
+      : this.relayerAddress;
     return new Address(addr).toScVal();
   }
 
@@ -93,49 +101,54 @@ export class RealChainRelayer {
       .setTimeout(60)
       .build();
 
-    const innerSigned = inner.signAndPrebuild(this.relayerKeypair).toEnvelope();
+    // Step 1: sign for simulation
+    inner.sign(this.relayerKeypair);
 
-    const feeBump = TransactionBuilder.buildFeeBumpTransaction(
-      this.relayerKeypair,
-      BASE_FEE,
-      innerSigned,
-      this.networkPassphrase
-    ).build();
+    // Step 2: simulate to get footprint / auth
+    const sim = await this.server.simulateTransaction(inner);
+    if (sim.error) {
+      throw new DomainError("CHAIN_SIMULATE_FAILED", "Soroban simulation failed: " + sim.error, { error: sim.error });
+    }
 
-    const send = await this.server.sendTransaction(feeBump);
-    if (send.status && send.status !== "PENDING" && send.status !== "SUCCESS") {
-      throw new DomainError("CHAIN_SUBMIT_FAILED", "Transaction rejected at submit.", { status: send.status });
+    // Step 3: prepare (injects footprint + sets resource fee)
+    const prepared = await this.server.prepareTransaction(inner);
+    prepared.sign(this.relayerKeypair);
+
+    // Step 4: submit
+    const send = await this.server.sendTransaction(prepared);
+    if (send.status === "ERROR") {
+      throw new DomainError("CHAIN_SUBMIT_FAILED", "Transaction rejected at submit.", { status: send.status, result: send.errorResult });
     }
 
     const hash = send.hash;
+    console.log(`[chain] submitted tx ${hash}, waiting for confirmation...`);
+
+    // Step 5: poll for confirmation
     const start = Date.now();
-    let result;
     while (Date.now() - start < 30000) {
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 2000));
       const tx = await this.server.getTransaction(hash);
       if (tx.status === "SUCCESS") {
-        result = tx;
-        break;
+        const ledger = tx.ledger ?? 0;
+        console.log(`[chain] tx ${hash} confirmed at ledger ${ledger}`);
+        return { txHash: hash, ledger };
       }
-      if (tx.status === "FAILED" || tx.status === "NOT_FOUND") {
+      if (tx.status === "FAILED") {
         throw new DomainError("CHAIN_TX_FAILED", "On-chain transaction failed.", { status: tx.status, hash });
       }
     }
-    if (!result) {
-      throw new DomainError("CHAIN_TX_TIMEOUT", "Transaction not confirmed within 30s.", { hash });
-    }
-
-    const ledger = result.ledger ?? 0;
-    return { txHash: hash, ledger };
+    throw new DomainError("CHAIN_TX_TIMEOUT", "Transaction not confirmed within 30s.", { hash });
   }
+
 
   // -------------------------------------------------------------- wallet ops
 
   /** Mint credits into `userId`'s wallet. Called on UPI top-up. */
   async mint({ userId, amountCredits }) {
+    const userScVal = await this.resolveAddressVal(userId);
     const op = this.contract.call(
       "mint",
-      this.addressVal(userId),
+      userScVal,
       this.i128Val(amountCredits)
     );
     const { txHash, ledger } = await this.submitFeeBumped(op);
@@ -146,9 +159,10 @@ export class RealChainRelayer {
 
   /** Burn credits from `hostId`'s earned balance. Called on host payout confirm. */
   async redeem({ hostId, amountCredits }) {
+    const hostScVal = await this.resolveAddressVal(hostId);
     const op = this.contract.call(
       "redeem",
-      this.addressVal(hostId),
+      hostScVal,
       this.i128Val(amountCredits)
     );
     const { txHash, ledger } = await this.submitFeeBumped(op);
@@ -160,7 +174,8 @@ export class RealChainRelayer {
   /** View: get a user's spendable/earned credit balance. */
   async balanceOf(userId) {
     try {
-      const op = this.contract.call("balance_of", this.addressVal(userId));
+      const userScVal = await this.resolveAddressVal(userId);
+      const op = this.contract.call("balance_of", userScVal);
       const source = await this.server.getAccount(this.relayerAddress);
       const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: this.networkPassphrase })
         .addOperation(op)
@@ -168,7 +183,7 @@ export class RealChainRelayer {
         .build();
       const sim = await this.server.simulateTransaction(tx);
       const val = sim.result?.retval;
-      return val ? Number(val) : 0;
+      return val ? Number(scValToNative(val)) : 0;
     } catch {
       return 0;
     }
@@ -185,7 +200,7 @@ export class RealChainRelayer {
         .build();
       const sim = await this.server.simulateTransaction(tx);
       const val = sim.result?.retval;
-      return val ? Number(val) : 0;
+      return val ? Number(scValToNative(val)) : 0;
     } catch {
       return 0;
     }
@@ -198,11 +213,14 @@ export class RealChainRelayer {
     const hostId = session?.hostId ?? riderId;
     const outletId = session?.outletId ?? sessionId;
 
+    const riderScVal = await this.resolveAddressVal(riderId);
+    const hostScVal = await this.resolveAddressVal(hostId);
+
     const op = this.contract.call(
       "lock_deposit",
       this.bytesVal(sessionId),
-      this.addressVal(riderId),
-      this.addressVal(hostId),
+      riderScVal,
+      hostScVal,
       this.bytesVal(outletId),
       this.i128Val(depositCredits),
       this.i128Val(this.pricePerKwhCredits),

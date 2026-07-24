@@ -14,7 +14,11 @@ export '../services/api_service.dart'
         HardwareCommand,
         HostEarnings,
         HostPayout,
-        BalanceResponse;
+        BalanceResponse,
+        FxRate,
+        UsdcIntent,
+        UsdcIntentStatus,
+        HostSourceLedger;
 
 class Outlet {
   final String id;

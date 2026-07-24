@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
+
 import 'models/models.dart';
 import 'services/api_service.dart';
 import 'services/real_services.dart';
@@ -13,9 +16,13 @@ final httpClientProvider = Provider<http.Client>((ref) {
   return client;
 });
 
-/// Base URL from env (dev: localhost, prod: your API gateway)
-/// Set via --dart-define=API_BASE_URL=https://api.gridshare.example
-const String apiBaseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: 'http://10.0.2.2:3000');
+String get _resolvedApiBaseUrl {
+  const envUrl = String.fromEnvironment('API_BASE_URL');
+  if (envUrl.isNotEmpty) return envUrl;
+  return 'http://localhost:8080';
+}
+
+final String apiBaseUrl = _resolvedApiBaseUrl;
 
 /// Core API service
 final apiServiceProvider = Provider<ApiService>((ref) {

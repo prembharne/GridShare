@@ -73,14 +73,8 @@ class _ListingSettingsScreenState extends State<ListingSettingsScreen> {
                       children: [
                         _RateModeChip(
                           label: 'Per Hour',
-                          selected: _rateMode == 'hour',
-                          onTap: () => setState(() => _rateMode = 'hour'),
-                        ),
-                        const SizedBox(width: AppSpacing.sm),
-                        _RateModeChip(
-                          label: 'Per kWh',
-                          selected: _rateMode == 'kwh',
-                          onTap: () => setState(() => _rateMode = 'kwh'),
+                          selected: true,
+                          onTap: () {},
                         ),
                       ],
                     ),
@@ -89,12 +83,13 @@ class _ListingSettingsScreenState extends State<ListingSettingsScreen> {
                       children: [
                         Expanded(
                           child: _CreditInput(
-                            controller: _rateMode == 'hour' ? _rateHourController : _rateKwhController,
-                            label: _rateMode == 'hour' ? 'credits / hour' : 'credits / kWh',
+                            controller: _rateHourController,
+                            label: 'credits / hour',
                           ),
                         ),
                       ],
                     ),
+
                     const SizedBox(height: AppSpacing.xs),
                     Text(
                       'Riders will see this rate on the map pin before booking.',

@@ -16,7 +16,8 @@ import '../../data/providers.dart';
 /// Bottom sheet showing outlet detail + "Start charging" CTA → navigates to payment.
 class OutletDetailSheet extends ConsumerWidget {
   final Outlet outlet;
-  const OutletDetailSheet({super.key, required this.outlet});
+  final VoidCallback? onDirectionPressed;
+  const OutletDetailSheet({super.key, required this.outlet, this.onDirectionPressed});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -101,6 +102,18 @@ class OutletDetailSheet extends ConsumerWidget {
                           }
                         : null,
                   ),
+                  const SizedBox(height: AppSpacing.sm),
+                  if (onDirectionPressed != null)
+                    AppButton(
+                      label: 'Directions',
+                      width: double.infinity,
+                      icon: Icons.directions_rounded,
+                      variant: AppButtonVariant.ghost,
+                      onPressed: () {
+                        context.pop();
+                        onDirectionPressed?.call();
+                      },
+                    ),
                   if (balance < 20) ...[
                     const SizedBox(height: AppSpacing.sm),
                     TextButton.icon(

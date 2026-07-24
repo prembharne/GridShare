@@ -1,19 +1,23 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/widgets/glass_card.dart';
+import '../../data/models/models.dart';
+import '../../data/providers.dart';
+import '../../data/services/api_service.dart';
 
-class IoTConfigScreen extends StatefulWidget {
+class IoTConfigScreen extends ConsumerStatefulWidget {
   const IoTConfigScreen({super.key});
 
   @override
-  State<IoTConfigScreen> createState() => _IoTConfigScreenState();
+  ConsumerState<IoTConfigScreen> createState() => _IoTConfigScreenState();
 }
 
-class _IoTConfigScreenState extends State<IoTConfigScreen> with SingleTickerProviderStateMixin {
+class _IoTConfigScreenState extends ConsumerState<IoTConfigScreen> with SingleTickerProviderStateMixin {
   late final AnimationController _pulseCtrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1400),
@@ -21,17 +25,74 @@ class _IoTConfigScreenState extends State<IoTConfigScreen> with SingleTickerProv
 
   String _status = 'idle'; // idle | scanning | paired
 
+  final _nameCtrl = TextEditingController(text: 'Wipro 16A Smart Plug');
+  final _deviceIdCtrl = TextEditingController(text: 'd72c4dd24f074a08fdwvz4');
+  final _rateCtrl = TextEditingController(text: '12.5');
+  final _addressCtrl = TextEditingController(text: "Prem's Prosumer EV Station");
+  bool _isRegistering = false;
+  Outlet? _pairedOutlet;
+
   @override
   void dispose() {
     _pulseCtrl.dispose();
+    _nameCtrl.dispose();
+    _deviceIdCtrl.dispose();
+    _rateCtrl.dispose();
+    _addressCtrl.dispose();
     super.dispose();
   }
 
-  void _startScan() {
-    setState(() => _status = 'scanning');
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _status = 'paired');
+  Future<void> _registerDevice() async {
+    final api = ref.read(apiServiceProvider);
+    final name = _nameCtrl.text.trim();
+    final deviceId = _deviceIdCtrl.text.trim();
+    final rate = double.tryParse(_rateCtrl.text.trim()) ?? 12.5;
+    final address = _addressCtrl.text.trim();
+
+    if (name.isEmpty || deviceId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter Device Name and Tuya Device ID.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _status = 'scanning';
+      _isRegistering = true;
     });
+
+    try {
+      final outlet = await api.addOutlet(
+        name: name,
+        providerDeviceId: deviceId,
+        ratePerKwh: rate,
+        address: address.isNotEmpty ? address : "Host Registered Station",
+      );
+
+      if (mounted) {
+        setState(() {
+          _status = 'paired';
+          _pairedOutlet = outlet;
+          _isRegistering = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('⚡ ${outlet.name} registered successfully on GridShare!'),
+            backgroundColor: AppColors.hostAccent,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'idle';
+          _isRegistering = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to register device: $e')),
+        );
+      }
+    }
   }
 
   @override
@@ -96,37 +157,59 @@ class _IoTConfigScreenState extends State<IoTConfigScreen> with SingleTickerProv
               ).animate().fadeIn(duration: 500.ms).scale(begin: const Offset(0.95, 0.95)),
               const SizedBox(height: AppSpacing.lg),
 
-              // ── QR Scan Trigger ───────────────────────────────────────
+              // ── Device Input Form ──────────────────────────────────────
               if (_status != 'paired') ...[
-                Text('PAIR YOUR DEVICE', style: AppTextStyles.label.copyWith(color: AppColors.textSecondary))
+                Text('REGISTER IOT SMART PLUG', style: AppTextStyles.label.copyWith(color: AppColors.textSecondary))
                     .animate().fadeIn(delay: 100.ms),
                 const SizedBox(height: AppSpacing.sm),
                 GlassCard(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      TextField(
+                        controller: _nameCtrl,
+                        style: AppTextStyles.body,
+                        decoration: const InputDecoration(
+                          labelText: 'Device / Station Name',
+                          hintText: 'e.g. Wipro 16A Smart Plug',
+                          prefixIcon: Icon(Icons.power_rounded, color: AppColors.hostAccent),
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      TextField(
+                        controller: _deviceIdCtrl,
+                        style: AppTextStyles.body,
+                        decoration: const InputDecoration(
+                          labelText: 'Tuya Device ID',
+                          hintText: 'e.g. d72c4dd24f074a08fdwvz4',
+                          prefixIcon: Icon(Icons.developer_board_rounded, color: AppColors.hostAccent),
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
-                          Container(
-                            width: 44,
-                            height: 44,
-                            decoration: BoxDecoration(
-                              color: AppColors.hostAccentSoft,
-                              borderRadius: BorderRadius.circular(AppSpacing.rSm),
+                          Expanded(
+                            child: TextField(
+                              controller: _rateCtrl,
+                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              style: AppTextStyles.body,
+                              decoration: const InputDecoration(
+                                labelText: 'Rate (Credits/kWh)',
+                                hintText: '12.5',
+                                prefixIcon: Icon(Icons.bolt_rounded, color: AppColors.hostAccent),
+                              ),
                             ),
-                            child: const Icon(Icons.qr_code_scanner_rounded,
-                                color: AppColors.hostAccent, size: 24),
                           ),
                           const SizedBox(width: AppSpacing.md),
                           Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('Scan QR on IoT Hardware',
-                                    style: AppTextStyles.title),
-                                Text('Point your camera at the QR code on the device.',
-                                    style: AppTextStyles.caption),
-                              ],
+                            child: TextField(
+                              controller: _addressCtrl,
+                              style: AppTextStyles.body,
+                              decoration: const InputDecoration(
+                                labelText: 'Station Address',
+                                hintText: "Prem's Station",
+                                prefixIcon: Icon(Icons.location_on_rounded, color: AppColors.hostAccent),
+                              ),
                             ),
                           ),
                         ],
@@ -135,7 +218,7 @@ class _IoTConfigScreenState extends State<IoTConfigScreen> with SingleTickerProv
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton.icon(
-                          onPressed: _status == 'scanning' ? null : _startScan,
+                          onPressed: _isRegistering ? null : _registerDevice,
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.hostAccent,
                             foregroundColor: AppColors.background,
@@ -145,11 +228,11 @@ class _IoTConfigScreenState extends State<IoTConfigScreen> with SingleTickerProv
                             ),
                             elevation: 0,
                           ),
-                          icon: Icon(_status == 'scanning'
+                          icon: Icon(_isRegistering
                               ? Icons.hourglass_top_rounded
-                              : Icons.qr_code_2_rounded),
+                              : Icons.add_link_rounded),
                           label: Text(
-                            _status == 'scanning' ? 'Searching…' : 'Scan QR Code',
+                            _isRegistering ? 'Registering Device…' : 'Register Smart Plug',
                             style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
                           ),
                         ),
@@ -168,7 +251,7 @@ class _IoTConfigScreenState extends State<IoTConfigScreen> with SingleTickerProv
                   glowColor: AppColors.hostAccent,
                   child: Column(
                     children: [
-                      _DeviceInfoRow(label: 'Device ID', value: 'GS-NODE-0x4A2F'),
+                      _DeviceInfoRow(label: 'Device ID', value: _pairedOutlet?.id ?? _deviceIdCtrl.text),
                       const Divider(height: 1, color: AppColors.border),
                       _DeviceInfoRow(label: 'Firmware', value: 'v2.1.4 (latest)'),
                       const Divider(height: 1, color: AppColors.border),

@@ -1,7 +1,8 @@
 import http from "node:http";
 import { URL } from "node:url";
-import { DomainError, toErrorResponse } from "./core/errors.js";
-import { verifyRazorpayWebhook } from "./security/razorpay-webhook.js";
+import { DomainError, invariant, toErrorResponse } from "./core/errors.js";
+import { verifyRazorpayWebhook, verifyRazorpaySignature } from "./security/razorpay-webhook.js";
+import { OUTLET_CATALOG, toNearbyPayload } from "./domain/outlet-catalog.js";
 
 async function readRaw(req, limitBytes) {
   const chunks = [];
@@ -80,6 +81,17 @@ export function createHttpServer(app) {
   const adminApiKey = app.config?.adminApiKey ?? "";
 
   return http.createServer(async (req, res) => {
+    // Global CORS Configuration
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-admin-key, x-razorpay-signature");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+
     const url = new URL(req.url, "http://localhost");
 
     try {
@@ -97,6 +109,133 @@ export function createHttpServer(app) {
             }
           }
         });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/auth/send-otp") {
+        const body = await readJson(req, bodyLimitBytes);
+        console.log(`[HTTP] POST /api/auth/send-otp -> phone: "${body.phone}"`);
+        const result = await app.otp.requestOtp(body.phone);
+        return sendJson(res, 200, {
+          otpSent: true,
+          message: result.viaSms ? "OTP sent via SMS." : "OTP generated (dev mode).",
+          expiresInSeconds: result.expiresInSeconds,
+          // Present only when SMS is not configured (dev fallback).
+          ...(result.devCode ? { devCode: result.devCode } : {})
+        });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/auth/verify-otp") {
+        const body = await readJson(req, bodyLimitBytes);
+
+        // Real verification: the code must match the one issued for this phone.
+        app.otp.verifyOtp(body.phone, body.otp);
+
+        // On success, persist a real user keyed by phone so the same phone always
+        // resolves to the same account (and the admin dashboard sees who signed in).
+        const role = body.role === "host" ? "host" : "rider";
+        const user = await app.users.upsertUser({
+          phoneE164: body.phone,
+          role,
+          displayName: body.name ?? null
+        });
+
+        const balance = await app.saga.getWalletBalance(user.id).catch(() => ({ balanceCredits: 0 }));
+
+        return sendJson(res, 200, {
+          accessToken: "mock_jwt_token_for_" + user.id,
+          refreshToken: "mock_refresh_token_for_" + user.id,
+          user: {
+            id: user.id,
+            name: user.displayName ?? "Rider",
+            phone: user.phoneE164 ?? body.phone,
+            role: user.role,
+            walletBalanceCredits: balance.balanceCredits ?? 0
+          }
+        });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/auth/clerk/exchange") {
+        const body = await readJson(req, bodyLimitBytes);
+        const role = body.role === "host" ? "host" : "rider";
+        const user = await app.users.upsertUser({
+          id: body.userId || undefined,
+          phoneE164: body.phone ?? null,
+          role,
+          displayName: body.name ?? null
+        });
+
+        const balance = await app.saga.getWalletBalance(user.id).catch(() => ({ balanceCredits: 0 }));
+
+        return sendJson(res, 200, {
+          accessToken: "mock_jwt_token_for_" + user.id,
+          refreshToken: "mock_refresh_token_for_" + user.id,
+          user: {
+            id: user.id,
+            name: user.displayName ?? body.name ?? "Rider",
+            phone: user.phoneE164 ?? body.phone ?? null,
+            role: user.role,
+            walletBalanceCredits: balance.balanceCredits ?? 0
+          }
+        });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/auth/google") {
+        const body = await readJson(req, bodyLimitBytes);
+        const { googleId, email, name } = body;
+        const user = await app.users.upsertUser({
+          id: googleId ? `google_${googleId}` : undefined,
+          phoneE164: email ?? null,
+          role: "rider",
+          displayName: name ?? email ?? "Google User"
+        });
+
+        const balance = await app.saga.getWalletBalance(user.id).catch(() => ({ balanceCredits: 0 }));
+
+        return sendJson(res, 200, {
+          accessToken: "jwt_token_google_" + user.id,
+          refreshToken: "refresh_token_google_" + user.id,
+          user: {
+            id: user.id,
+            name: user.displayName ?? "Google User",
+            phone: user.phoneE164 ?? "",
+            role: user.role,
+            walletBalanceCredits: balance.balanceCredits ?? 0
+          }
+        });
+      }
+
+      if (req.method === "GET" && url.pathname === "/outlets/nearby") {
+        console.log(`[MOCK API] Fetching nearby outlets`);
+        return sendJson(res, 200, {
+          ok: true,
+          outlets: OUTLET_CATALOG.map(toNearbyPayload)
+        });
+      }
+
+      if (req.method === "POST" && url.pathname === "/outlets") {
+        const body = await readJson(req, bodyLimitBytes);
+        invariant(body.name, "INVALID_NAME", "Device name is required.");
+        invariant(body.providerDeviceId, "INVALID_DEVICE", "Tuya Device ID is required.");
+
+        const newOutlet = {
+          id: `outlet_${Date.now()}`,
+          name: body.name,
+          host_name: body.hostName ?? "Host Prosumer",
+          hostId: body.hostId ?? "host_1",
+          providerDeviceId: body.providerDeviceId,
+          lat: Number(body.lat ?? 19.0760),
+          lng: Number(body.lng ?? 72.8777),
+          distance_km: 0.1,
+          rate_per_kwh: Number(body.ratePerKwh ?? 12.5),
+          available: true,
+          connector_type: body.connectorType ?? "16A Socket",
+          rating: 5.0,
+          address: body.address ?? "Host Registered Station"
+        };
+
+        OUTLET_CATALOG.push(newOutlet);
+        console.log(`[HOST API] Registered new IoT Smart Plug outlet: ${newOutlet.name} (${newOutlet.providerDeviceId})`);
+        return sendJson(res, 201, { ok: true, data: { outlet: toNearbyPayload(newOutlet) } });
       }
 
       if (req.method === "GET" && url.pathname === "/events") {
@@ -138,6 +277,74 @@ export function createHttpServer(app) {
 
       // ============================ WALLET ============================
 
+      if (req.method === "POST" && url.pathname === "/wallet/topup/instamojo") {
+        const body = await readJson(req, bodyLimitBytes);
+        invariant(body.userId, "INVALID_USER", "userId is required.");
+        const amountCredits = Math.floor(Number(body.amountCredits));
+        invariant(Number.isInteger(amountCredits) && amountCredits > 0, "INVALID_AMOUNT", "amountCredits must be > 0.");
+
+        const result = await app.instamojoAdapter.createPaymentRequest({
+          userId: body.userId,
+          amountCredits,
+          phone: body.phone ?? "",
+          name: body.name ?? "GridShare Rider",
+          email: body.email ?? ""
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          data: {
+            paymentUrl: result.paymentUrl,
+            requestId: result.requestId,
+            amountCredits
+          }
+        });
+      }
+
+      if (req.method === "POST" && url.pathname === "/wallet/topup/instamojo/verify") {
+        const body = await readJson(req, bodyLimitBytes);
+        const { paymentRequestId, paymentId, userId, amountCredits } = body;
+
+        const result = await app.instamojoAdapter.verifyPayment(paymentRequestId, paymentId);
+        if (result.paid) {
+          const creditsToMint = amountCredits ?? Math.floor(result.amount);
+          await app.saga.topUpWallet({
+            userId: userId ?? "user_1",
+            amountCredits: creditsToMint,
+            paymentId,
+            source: "instamojo_upi"
+          });
+          const balance = await app.saga.getWalletBalance(userId ?? "user_1");
+          return sendJson(res, 200, {
+            ok: true,
+            data: { verified: true, balanceCredits: balance.balanceCredits }
+          });
+        } else {
+          throw new DomainError("VERIFICATION_FAILED", "Instamojo payment verification failed.");
+        }
+      }
+
+      if (req.method === "GET" && url.pathname === "/wallet/topup/instamojo/redirect") {
+        const paymentId = url.searchParams.get("payment_id");
+        const paymentRequestId = url.searchParams.get("payment_request_id");
+        const paymentStatus = url.searchParams.get("payment_status");
+
+        const html = `<!DOCTYPE html>
+<html>
+<head><title>GridShare Payment</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family:sans-serif; text-align:center; padding:40px; background:#0B132B; color:#fff;">
+  <h2 style="color:#00F5D4;">Payment ${paymentStatus === 'Credit' ? 'Successful!' : 'Processing'}</h2>
+  <p>Status: ${paymentStatus}</p>
+  <p>Payment ID: ${paymentId}</p>
+  <p>Request ID: ${paymentRequestId}</p>
+  <p style="margin-top:30px; color:#A0AEC0;">You can close this window and return to the GridShare app.</p>
+</body>
+</html>`;
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(html);
+        return;
+      }
+
       if (req.method === "POST" && url.pathname === "/wallet/topup") {
         const body = await readJson(req, bodyLimitBytes);
         const order = await app.paymentAdapter?.createOrder({
@@ -148,21 +355,319 @@ export function createHttpServer(app) {
         return sendJson(res, 200, { ok: true, data: order });
       }
 
+      if (req.method === "POST" && url.pathname === "/wallet/topup/verify") {
+        const body = await readJson(req, bodyLimitBytes);
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = body;
+
+        const isValid = verifyRazorpaySignature(
+          razorpay_order_id,
+          razorpay_payment_id,
+          razorpay_signature,
+          app.config?.razorpayKeySecret
+        );
+
+        if (!isValid) {
+          throw new DomainError("VERIFICATION_FAILED", "Signature mismatch");
+        }
+
+        return sendJson(res, 200, { ok: true, data: { verified: true } });
+      }
+
+
       if (req.method === "GET" && url.pathname.startsWith("/wallet/") && url.pathname.endsWith("/balance")) {
         const userId = url.pathname.split("/")[2];
         const data = await app.saga.getWalletBalance(userId);
         return sendJson(res, 200, { ok: true, data });
       }
 
+      // ── Source ledger: UPI vs USDC funding provenance ──
+      // Used by mobile host earnings screen to show separate UPI / USDC buckets.
+      if (req.method === "GET" && url.pathname.startsWith("/wallet/") && url.pathname.endsWith("/source-ledger")) {
+        const userId = url.pathname.split("/")[2];
+        const data = await app.store.getSourceLedger(userId);
+        return sendJson(res, 200, { ok: true, data });
+      }
+
+      // ── Live USD→INR exchange rate (for USDC top-up quoting) ──
+      if (req.method === "GET" && url.pathname === "/fx/usd-inr") {
+        const data = await app.fxRate.getUsdInr();
+        return sendJson(res, 200, { ok: true, data });
+      }
+
+      // ── USDC top-up: create a deposit intent (address + memo + QR) ──
+      // Quotes credits at the live USD→INR rate and LOCKS that rate into the
+      // intent, so what the rider sees is exactly what gets minted.
+      if (req.method === "POST" && url.pathname === "/wallet/topup/usdc") {
+        if (!app.usdcAdapter) {
+          throw new DomainError("USDC_DISABLED", "USDC top-up is not enabled on this server.");
+        }
+        const body = await readJson(req, bodyLimitBytes);
+        invariant(body.userId, "INVALID_USER", "userId is required.");
+        const amountCredits = Math.floor(Number(body.amountCredits));
+        invariant(Number.isInteger(amountCredits) && amountCredits > 0, "INVALID_AMOUNT", "amountCredits must be a positive integer.");
+        const asset = String(body.asset ?? body.assetCode ?? "USDC").toUpperCase() === "XLM" ? "XLM" : "USDC";
+
+        const { rate } = await app.fxRate.getUsdInr();
+        // Testnet XLM support uses the same quote pipeline; production should
+        // replace this with a real XLM/INR quote before enabling mainnet XLM.
+        const expectedUsdc = Math.ceil((amountCredits / rate) * 1e7) / 1e7; // round up to stroop
+        const intent = app.usdcAdapter.buildIntent({ amountCredits, expectedUsdc, asset });
+
+        await app.store.createUsdcIntent({
+          memo: intent.memo,
+          userId: body.userId,
+          amountCredits,
+          expectedUsdc,
+          assetCode: intent.assetCode,
+          assetType: intent.assetType,
+          lockedRate: rate,
+          status: "pending",
+          expiresAt: new Date(Date.now() + app.config.usdcIntentTtlSeconds * 1000).toISOString()
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          data: {
+            memo: intent.memo,
+            depositAddress: intent.depositAddress,
+            assetCode: intent.assetCode,
+            assetIssuer: intent.assetIssuer,
+            assetType: intent.assetType,
+            expectedUsdc,
+            amountCredits,
+            lockedRate: rate,
+            qrUri: intent.qrUri,
+            expiresInSeconds: app.config.usdcIntentTtlSeconds
+          }
+        });
+      }
+
+      // ── USDC top-up: verify/confirm intent manually or after payment ──
+      if (req.method === "POST" && url.pathname.startsWith("/wallet/topup/usdc/") && url.pathname.endsWith("/verify")) {
+        const parts = url.pathname.split("/");
+        const memo = decodeURIComponent(parts[4] ?? "");
+        let intent = await app.store.getUsdcIntentByMemo(memo);
+        if (!intent) {
+          throw new DomainError("USDC_INTENT_NOT_FOUND", "No USDC intent for this memo.", { memo });
+        }
+
+        if (intent.status === "pending") {
+          const payment = app.usdcAdapter ? await app.usdcAdapter.checkRecentPayments({ memo, asset: intent.assetCode }) : null;
+          if (!payment) {
+            return sendJson(res, 200, {
+              ok: true,
+              data: {
+                memo: intent.memo,
+                status: intent.status,
+                amountCredits: intent.amountCredits,
+                expectedUsdc: intent.expectedUsdc,
+                assetCode: intent.assetCode ?? "USDC",
+                txHash: intent.txHash,
+                pendingVerification: true
+              }
+            });
+          }
+
+          if (payment.amountUsdc + 1e-7 < intent.expectedUsdc) {
+            return sendJson(res, 200, {
+              ok: true,
+              data: {
+                memo: intent.memo,
+                status: intent.status,
+                amountCredits: intent.amountCredits,
+                expectedUsdc: intent.expectedUsdc,
+                assetCode: intent.assetCode ?? "USDC",
+                txHash: intent.txHash,
+                underpaid: true,
+                receivedAmount: payment.amountUsdc
+              }
+            });
+          }
+
+          // Use memo+txHash as idempotency key so different intents paying
+          // to the same deposit address never conflict.
+          const intentPaymentId = `${memo}:${payment.txHash}`;
+          app.config?.logger?.info?.(`[usdc:verify] minting ${intent.amountCredits} credits → userId=${intent.userId} tx=${payment.txHash} paymentId=${intentPaymentId}`);
+          await app.saga.topUpWallet({
+            userId: intent.userId,
+            amountCredits: intent.amountCredits,
+            paymentId: intentPaymentId,
+            source: "usdc"
+          });
+          await app.store.updateUsdcIntent(memo, { status: "confirmed", txHash: payment.txHash, paidAssetCode: payment.assetCode });
+          intent = await app.store.getUsdcIntentByMemo(memo);
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          data: {
+            memo: intent.memo,
+            status: intent.status,
+            amountCredits: intent.amountCredits,
+            expectedUsdc: intent.expectedUsdc,
+            assetCode: intent.assetCode ?? "USDC",
+            txHash: intent.txHash
+          }
+        });
+      }
+
+      // ── USDC top-up: poll intent status ──
+      if (req.method === "GET" && url.pathname.startsWith("/wallet/topup/usdc/")) {
+        const memo = decodeURIComponent(url.pathname.split("/")[4] ?? "");
+        invariant(memo, "INVALID_MEMO", "memo is required.");
+        let intent = await app.store.getUsdcIntentByMemo(memo);
+        if (!intent) {
+          throw new DomainError("USDC_INTENT_NOT_FOUND", "No USDC intent for this memo.", { memo });
+        }
+
+        // Active verification if intent is still pending
+        if (intent.status === "pending" && app.usdcAdapter) {
+          const payment = await app.usdcAdapter.checkRecentPayments({ memo, asset: intent.assetCode });
+          if (payment) {
+            if (payment.amountUsdc + 1e-7 >= intent.expectedUsdc) {
+              await app.saga.topUpWallet({
+                userId: intent.userId,
+                amountCredits: intent.amountCredits,
+                paymentId: payment.txHash,
+                source: "usdc"
+              });
+              await app.store.updateUsdcIntent(memo, { status: "confirmed", txHash: payment.txHash, paidAssetCode: payment.assetCode });
+              intent = await app.store.getUsdcIntentByMemo(memo);
+            }
+          }
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          data: {
+            memo: intent.memo,
+            status: intent.status,       // pending | confirmed | expired
+            amountCredits: intent.amountCredits,
+            expectedUsdc: intent.expectedUsdc,
+            assetCode: intent.assetCode ?? "USDC",
+            txHash: intent.txHash
+          }
+        });
+      }
+
+
+      // ============================ ADMIN ============================
+
+      // Overview metrics: total users/hosts/riders, active sessions, credits in circulation.
+      if (req.method === "GET" && url.pathname === "/admin/overview") {
+        requireAdmin(req, adminApiKey);
+        const counts = await app.users.countByRole();
+        const sessions = await app.store.listSessions();
+        const activeStatuses = new Set(["created", "active", "lock_failed", "stopping"]);
+        const activeSessions = sessions.filter((s) => activeStatuses.has(s.status)).length;
+        let creditsInCirculation = null;
+        try {
+          creditsInCirculation = await app.chain.totalSupply();
+        } catch {
+          creditsInCirculation = null;
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          data: {
+            totalUsers: counts.total,
+            riders: counts.rider,
+            hosts: counts.host,
+            admins: counts.admin,
+            totalSessions: sessions.length,
+            activeSessions,
+            creditsInCirculation
+          }
+        });
+      }
+
+      // Users directory: every registered user with wallet balance + session count.
+      if (req.method === "GET" && url.pathname === "/admin/users") {
+        requireAdmin(req, adminApiKey);
+        const roleFilter = url.searchParams.get("role") ?? undefined;
+        const users = await app.users.listUsers({ role: roleFilter });
+        const sessions = await app.store.listSessions();
+        const sessionCount = new Map();
+        for (const s of sessions) {
+          sessionCount.set(s.riderId, (sessionCount.get(s.riderId) ?? 0) + 1);
+        }
+        const rows = [];
+        for (const u of users) {
+          const balance = await app.saga.getWalletBalance(u.id).catch(() => ({ balanceCredits: 0 }));
+          rows.push({
+            id: u.id,
+            name: u.displayName,
+            phone: u.phoneE164,
+            role: u.role,
+            balanceCredits: balance.balanceCredits ?? 0,
+            sessionCount: sessionCount.get(u.id) ?? 0,
+            joinedAt: u.createdAt
+          });
+        }
+        return sendJson(res, 200, { ok: true, data: rows });
+      }
+
+      // Hosts directory: hosts with earned credits + hosted-session count.
+      if (req.method === "GET" && url.pathname === "/admin/hosts") {
+        requireAdmin(req, adminApiKey);
+        const hosts = await app.users.listHosts();
+        const sessions = await app.store.listSessions();
+        const hostedCount = new Map();
+        for (const s of sessions) {
+          hostedCount.set(s.hostId, (hostedCount.get(s.hostId) ?? 0) + 1);
+        }
+        const rows = [];
+        for (const host of hosts) {
+          const e = await app.saga.getHostEarnings(host.id).catch(() => ({ earnedCredits: 0 }));
+          rows.push({
+            id: host.id,
+            name: host.displayName,
+            phone: host.phoneE164,
+            earnedCredits: e.earnedCredits ?? 0,
+            hostedSessions: hostedCount.get(host.id) ?? 0,
+            joinedAt: host.createdAt
+          });
+        }
+        return sendJson(res, 200, { ok: true, data: rows });
+      }
+
+      // Sessions / activity feed across all users.
+      if (req.method === "GET" && url.pathname === "/admin/sessions") {
+        requireAdmin(req, adminApiKey);
+        const statusesParam = url.searchParams.get("status");
+        const statuses = statusesParam ? statusesParam.split(",") : undefined;
+        const sessions = await app.store.listSessions({ statuses });
+        const rows = sessions
+          .map((s) => ({
+            id: s.id,
+            riderId: s.riderId,
+            hostId: s.hostId,
+            outletId: s.outletId,
+            status: s.status,
+            depositCredits: s.depositCredits,
+            settlement: s.settlement ?? null,
+            stopReason: s.stopReason ?? null,
+            createdAt: s.createdAt,
+            updatedAt: s.updatedAt
+          }))
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+        return sendJson(res, 200, { ok: true, data: rows });
+      }
+
       // ============================ ADMIN OFF-RAMP ============================
 
+      // Legacy shape kept for the existing dashboard: [{ hostId, earnedCredits }].
       if (req.method === "GET" && url.pathname === "/admin/hosts/earnings") {
         requireAdmin(req, adminApiKey);
-        const hosts = await app.store.listHosts?.() ?? [];
+        const hosts = await app.users.listHosts();
         const earnings = [];
         for (const host of hosts) {
-          const e = await app.saga.getHostEarnings(host.id);
-          earnings.push({ hostId: host.id, earnedCredits: e.earnedCredits });
+          const e = await app.saga.getHostEarnings(host.id).catch(() => ({ earnedCredits: 0 }));
+          earnings.push({
+            hostId: host.id,
+            name: host.displayName,
+            phone: host.phoneE164,
+            earnedCredits: e.earnedCredits ?? 0
+          });
         }
         return sendJson(res, 200, { ok: true, data: earnings });
       }
@@ -171,7 +676,15 @@ export function createHttpServer(app) {
         requireAdmin(req, adminApiKey);
         const hostId = url.pathname.split("/")[3];
         const body = await readJson(req, bodyLimitBytes);
-        const data = await app.saga.createHostPayout({ hostId, credits: body.credits, method: body.method ?? "upi" });
+        const credits = body.credits;
+        // createHostPayout lives on the store (records a pending off-ramp), not
+        // the saga. Credits are 1:1 INR.
+        const data = await app.store.createHostPayout({
+          hostId,
+          credits,
+          inrAmount: credits,
+          method: body.method ?? "upi"
+        });
         return sendJson(res, 200, { ok: true, data });
       }
 
@@ -187,6 +700,16 @@ export function createHttpServer(app) {
 
       if (req.method === "POST" && url.pathname === "/sessions/intent") {
         const body = await readJson(req, bodyLimitBytes);
+        // Register the parties BEFORE creating the session. When persistence is
+        // on, sessions have a foreign key to users, so the rider/host rows must
+        // exist first. This also ensures the admin dashboard sees hosts (and any
+        // rider that reached the app via a path other than OTP login).
+        if (body.hostId) {
+          await app.users.upsertUser({ id: body.hostId, role: "host" }).catch(() => { });
+        }
+        if (body.riderId) {
+          await app.users.upsertUser({ id: body.riderId, role: "rider" }).catch(() => { });
+        }
         const data = await app.saga.createIntent(body);
         return sendJson(res, 201, { ok: true, data });
       }

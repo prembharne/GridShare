@@ -9,19 +9,25 @@ import '../features/home/home_screen.dart';
 import '../features/scan/scan_screen.dart';
 import '../features/payment/payment_sheet.dart';
 import '../features/charging/charging_screen.dart';
+import '../features/auth/splash_screen.dart';
 
 /// Route table. Screens receive their data via `extra` (Session/Outlet).
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
-    initialLocation: '/auth',
+    initialLocation: '/splash',
     redirect: (context, state) {
       final loggedIn = ref.read(currentUserProvider) != null;
-      final goingToAuth = state.matchedLocation.startsWith('/auth');
-      if (!loggedIn && !goingToAuth) return '/auth';
-      if (loggedIn && goingToAuth) return '/';
+      final location = state.matchedLocation;
+
+      // Allow SplashScreen to perform its 3s async restore & redirect
+      if (location == '/splash') return null;
+
+      if (!loggedIn && !location.startsWith('/auth')) return '/auth';
+      if (loggedIn && location.startsWith('/auth')) return '/';
       return null;
     },
     routes: [
+      GoRoute(path: '/splash', builder: (_, __) => const SplashScreen()),
       GoRoute(path: '/auth', builder: (_, __) => const ClerkAuthScreen()),
       GoRoute(path: '/', builder: (_, __) => const HomeScreen()),
       GoRoute(

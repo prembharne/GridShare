@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'api_service.dart';
 import '../models/models.dart';
@@ -118,7 +119,7 @@ class TelemetryService {
 
   String _buildWebSocketUrl(String sessionId) {
     // Build WebSocket URL from the API base URL
-    const baseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: 'http://10.0.2.2:3000');
+    const baseUrl = String.fromEnvironment('API_BASE_URL', defaultValue: 'http://10.0.2.2:8080');
     final wsBase = baseUrl.replaceFirst('http', 'ws');
     return '$wsBase/api/sessions/$sessionId/telemetry';
   }
@@ -140,17 +141,41 @@ class AuthService {
     final response = await _api.verifyOtp(phone: phone, otp: otp, idempotencyKey: 'verify_otp_$phone');
 
     // Store tokens if login successful
-    if (response.accessToken != null && response.refreshToken != null) {
+    if (response.accessToken != null) {
       await _storage.saveTokens(
         accessToken: response.accessToken!,
-        refreshToken: response.refreshToken!,
+        refreshToken: response.refreshToken ?? '',
       );
-
       if (response.user != null) {
         await _storage.saveUserId(response.user!.id);
+        await _storage.saveUserData(response.user!);
       }
     }
+    return response;
+  }
 
+  /// Sign in with Google ID token — exchanges with backend for session JWT.
+  Future<AuthResponse> signInWithGoogle({
+    required String googleId,
+    required String email,
+    required String name,
+  }) async {
+    final res = await _api.post(
+      path: '/api/auth/google',
+      body: { 'googleId': googleId, 'email': email, 'name': name },
+      idempotencyKey: 'google_$googleId',
+    );
+    final response = AuthResponse.fromJson(res);
+    if (response.accessToken != null) {
+      await _storage.saveTokens(
+        accessToken: response.accessToken!,
+        refreshToken: response.refreshToken ?? '',
+      );
+      if (response.user != null) {
+        await _storage.saveUserId(response.user!.id);
+        await _storage.saveUserData(response.user!);
+      }
+    }
     return response;
   }
 
@@ -212,6 +237,25 @@ class AuthService {
     final balance = await _api.getBalance(userId: userId);
     return User(id: userId, name: 'Rider', phone: '', walletBalanceCredits: balance.balanceCredits);
   }
+
+  /// Try to restore session from secure storage on app startup.
+  /// Returns the stored User if valid session exists, otherwise null.
+  Future<User?> tryRestoreSession() async {
+    try {
+      final token = await _storage.getAccessToken();
+      final userId = await _storage.getUserId();
+      if (token == null || userId == null) return null;
+      // Try to load cached user data first (fast path, no network needed)
+      final cached = await _storage.getUserData();
+      if (cached != null) return cached;
+      // Fallback: fetch fresh from backend
+      return await fetchUserWithBalance(userId);
+    } catch (_) {
+      // Token expired or network error — clear and force re-login
+      await _storage.clearTokens();
+      return null;
+    }
+  }
 }
 
 class AuthTokens {
@@ -220,31 +264,23 @@ class AuthTokens {
   AuthTokens({required this.accessToken, required this.refreshToken});
 }
 
-/// Secure storage wrapper for JWT tokens and user data
+/// Secure storage wrapper for JWT tokens and user data.
+/// Uses flutter_secure_storage to persist across app restarts.
 class SecureStorage {
-  // In production, use flutter_secure_storage:
-  // static const _storage = FlutterSecureStorage();
-  // await _storage.write(key: 'access_token', value: token);
-
-  // For now, using in-memory + SharedPreferences fallback
-  final Map<String, String> _memory = {};
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
 
   Future<void> write({required String key, required String value}) async {
-    _memory[key] = value;
-    // TODO: Replace with FlutterSecureStorage in production
-    // await FlutterSecureStorage().write(key: key, value: value);
+    await _storage.write(key: key, value: value);
   }
 
   Future<String?> read({required String key}) async {
-    return _memory[key];
-    // TODO: Replace with FlutterSecureStorage in production
-    // return FlutterSecureStorage().read(key: key);
+    return _storage.read(key: key);
   }
 
   Future<void> delete({required String key}) async {
-    _memory.remove(key);
-    // TODO: Replace with FlutterSecureStorage in production
-    // await FlutterSecureStorage().delete(key: key);
+    await _storage.delete(key: key);
   }
 
   // Convenience methods for auth tokens
@@ -257,14 +293,36 @@ class SecureStorage {
     await write(key: 'user_id', value: userId);
   }
 
+  /// Cache full user data as JSON so we can restore without a network call.
+  Future<void> saveUserData(User user) async {
+    await write(key: 'cached_user', value: jsonEncode({
+      'id': user.id,
+      'name': user.name,
+      'phone': user.phone,
+      'walletBalanceCredits': user.walletBalanceCredits,
+    }));
+  }
+
+  Future<User?> getUserData() async {
+    final raw = await read(key: 'cached_user');
+    if (raw == null) return null;
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      return User(
+        id: j['id'] as String,
+        name: j['name'] as String? ?? 'Rider',
+        phone: j['phone'] as String? ?? '',
+        walletBalanceCredits: (j['walletBalanceCredits'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) { return null; }
+  }
+
   Future<String?> getAccessToken() async => read(key: 'access_token');
   Future<String?> getRefreshToken() async => read(key: 'refresh_token');
   Future<String?> getUserId() async => read(key: 'user_id');
 
   Future<void> clearTokens() async {
-    await delete(key: 'access_token');
-    await delete(key: 'refresh_token');
-    await delete(key: 'user_id');
+    await _storage.deleteAll();
   }
 }
 

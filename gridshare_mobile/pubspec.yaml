@@ -16,10 +16,17 @@ dependencies:
   flutter_riverpod: ^2.5.1
   flutter_secure_storage: ^9.2.2
   go_router: ^14.2.7
+  google_sign_in: ^6.2.1
   http: ^1.2.1
   latlong2: ^0.10.1
+  geolocator: ^12.0.0
   rive: ^0.13.10
+
+  qr_flutter: ^4.1.0
   web_socket_channel: ^3.0.1
+  webview_flutter: ^4.10.0
+  mobile_scanner: ^6.0.0
+
 
 dev_dependencies:
   flutter_launcher_icons: ^0.14.4
@@ -42,7 +49,7 @@ flutter:
     - assets/rive/
 
 flutter_launcher_icons:
-  android: "launcher_icon"
+  android: "ic_launcher_new"
   ios: true
   image_path: "assets/logo.png"
   min_sdk_android: 21

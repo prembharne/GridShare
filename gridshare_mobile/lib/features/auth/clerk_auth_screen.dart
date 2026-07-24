@@ -1,24 +1,20 @@
 // Copyright 2024 GridShare. All rights reserved.
-// Use of this source code is governed by a MIT-style license that can be
-// found in the LICENSE file.
 
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/widgets/app_button.dart';
-import '../../core/widgets/magical_text.dart';
 import '../../core/animations/animated_counter.dart';
-import '../../core/shaders/shader_canvas.dart';
 import '../../data/providers.dart';
 
-/// Clerk authentication screen using native Android View (Clerk SignInOrUpView)
-/// This replaces the OTP-based auth with Clerk's Google One Tap + email/password flow
+/// Clerk authentication screen — Premium Dark Theme (unified with app design system).
+/// Navy base + ambient cyan/emerald orbs + frosted glass login card.
 class ClerkAuthScreen extends ConsumerStatefulWidget {
   const ClerkAuthScreen({super.key});
 
@@ -28,68 +24,497 @@ class ClerkAuthScreen extends ConsumerStatefulWidget {
 
 class _ClerkAuthScreenState extends ConsumerState<ClerkAuthScreen> {
   final _channel = const MethodChannel('gridshare_mobile/clerk_auth');
+  final _phoneController = TextEditingController();
+  final _otpController = TextEditingController();
+
+  // Google Sign-In instance configured with Web Client ID (serverClientId)
+  static final _googleSignIn = GoogleSignIn(
+    serverClientId: '959322421139-ljm30f0l25p7lor9gnqqi97sfviegqna.apps.googleusercontent.com',
+    scopes: ['email', 'profile'],
+  );
+
+
+
+  bool _isLoading = false;
+  bool _otpSent = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _channel.setMethodCallHandler(_handleMethodCall);
+    _channel.setMethodCallHandler(_handleNativeCall);
   }
 
-  Future<void> _handleMethodCall(MethodCall call) async {
+  Future<void> _handleNativeCall(MethodCall call) async {
+    if (!mounted) return;
     switch (call.method) {
       case 'onSignInComplete':
-        _onSignInComplete(call.arguments as Map<dynamic, dynamic>);
+      case 'onSignUpComplete':
+        final args = call.arguments as Map<dynamic, dynamic>;
+        final accessToken = args['accessToken'] as String?;
+        final userId = args['userId'] as String?;
+        if (accessToken != null && userId != null) {
+          await _completeLogin(accessToken: accessToken, userId: userId);
+        }
         break;
       case 'onSignInFailed':
-        _onSignInFailed(call.arguments as String);
-        break;
-      case 'onSignUpComplete':
-        _onSignInComplete(call.arguments as Map<dynamic, dynamic>);
-        break;
       case 'onSignUpFailed':
-        _onSignInFailed(call.arguments as String);
+        setState(() { _error = call.arguments as String; _isLoading = false; });
         break;
     }
   }
 
-  void _onSignInComplete(Map<dynamic, dynamic> args) async {
-    final accessToken = args['accessToken'] as String?;
-    final userId = args['userId'] as String?;
+  Future<void> _completeLogin({required String accessToken, required String userId}) async {
+    try {
+      final secureStorage = ref.read(secureStorageProvider);
+      final authService = ref.read(authServiceProvider);
+      await secureStorage.saveTokens(accessToken: accessToken, refreshToken: '');
+      final user = await authService.fetchUserWithBalance(userId);
+      if (mounted) {
+        ref.read(currentUserProvider.notifier).state = user;
+        context.go('/');
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = 'Login failed: $e'; _isLoading = false; });
+    }
+  }
 
-    if (accessToken != null && userId != null) {
-      try {
-        // Store token and get user profile with wallet balance
-        final authService = ref.read(authServiceProvider);
-        final secureStorage = ref.read(secureStorageProvider);
+  Future<void> _sendOtp() async {
+    final phone = _phoneController.text.trim();
+    if (phone.isEmpty) {
+      setState(() => _error = 'Please enter your phone number.');
+      return;
+    }
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      final authService = ref.read(authServiceProvider);
+      await authService.sendOtp(phone);
+      if (mounted) setState(() { _otpSent = true; _isLoading = false; });
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _isLoading = false; });
+    }
+  }
 
-        await secureStorage.saveTokens(
-          accessToken: accessToken,
-          refreshToken: '', // Clerk handles refresh internally
-        );
-
-        // Get user profile from backend using Clerk token
-        final response = await authService.fetchUserWithBalance(userId);
-
+  Future<void> _verifyOtp() async {
+    final otp = _otpController.text.trim();
+    if (otp.isEmpty) {
+      setState(() => _error = 'Please enter the OTP.');
+      return;
+    }
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      final authService = ref.read(authServiceProvider);
+      final phone = _phoneController.text.trim();
+      final response = await authService.verifyOtp(phone, otp);
+      if (response.accessToken != null && response.user != null) {
         if (mounted) {
-          ref.read(currentUserProvider.notifier).state = response;
+          ref.read(currentUserProvider.notifier).state = response.user!;
           context.go('/');
         }
-      } catch (e) {
-        if (mounted) {
-          setState(() {
-            _error = 'Failed to sync user: $e';
-          });
-        }
+      } else {
+        if (mounted) setState(() { _error = 'Verification failed. Try again.'; _isLoading = false; });
       }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); _isLoading = false; });
     }
   }
 
-  void _onSignInFailed(String error) {
-    if (mounted) {
-      setState(() {
-        _error = error;
-      });
+  Future<void> _signInWithGoogle() async {
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      // Sign out first to show account picker every time
+      await _googleSignIn.signOut();
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) {
+        // User cancelled the sign-in
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+      final authService = ref.read(authServiceProvider);
+      final response = await authService.signInWithGoogle(
+        googleId: googleUser.id,
+        email: googleUser.email,
+        name: googleUser.displayName ?? googleUser.email,
+      );
+      if (response.user != null && mounted) {
+        ref.read(currentUserProvider.notifier).state = response.user!;
+        context.go('/');
+      } else {
+        if (mounted) setState(() { _error = 'Google sign-in failed. Try again.'; _isLoading = false; });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = 'Google sign-in error: ${e.toString().replaceFirst('Exception: ', '')}'; _isLoading = false; });
+    }
+  }
+
+  @override
+  void dispose() {
+    _channel.setMethodCallHandler(null);
+    _phoneController.dispose();
+    _otpController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      resizeToAvoidBottomInset: true,
+      body: Stack(
+        children: [
+          // 1. Deep navy base
+          const Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: AppColors.background),
+            ),
+          ),
+          // 2. Diffused ambient accent orbs (cyan + emerald) for organic depth
+          Positioned(
+            top: -90, right: -90,
+            child: Container(
+              width: 300, height: 300,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: AppColors.accent.withOpacity(0.14), // cyan glow
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: -110, left: -70,
+            child: Container(
+              width: 340, height: 340,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: AppColors.hostAccent.withOpacity(0.10), // emerald glow
+              ),
+            ),
+          ),
+          // 3. Main Content
+          Positioned.fill(
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+                child: LayoutBuilder(builder: (context, constraints) {
+                  return SingleChildScrollView(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: AppSpacing.xl),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const SizedBox(height: AppSpacing.xxl),
+                            
+                            // Header Logo Icon
+                            FadeSlide(
+                              delay: const Duration(milliseconds: 80),
+                              child: Container(
+                                padding: const EdgeInsets.all(AppSpacing.md),
+                                decoration: BoxDecoration(
+                                  gradient: AppColors.accentGlow,
+                                  borderRadius: BorderRadius.circular(AppSpacing.rMd),
+                                  boxShadow: AppSpacing.glow(color: AppColors.accent),
+                                ),
+                                child: const Icon(Icons.bolt_rounded, color: AppColors.background, size: 28),
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.lg),
+                            
+                            // Clean premium dark slate typography
+                            FadeSlide(
+                              delay: const Duration(milliseconds: 160),
+                              child: const Text(
+                                'Welcome to\nGridShare',
+                                style: TextStyle(
+                                  fontFamily: AppTextStyles.displayFamily,
+                                  fontSize: 36,
+                                  fontWeight: FontWeight.w800,
+                                  color: AppColors.textPrimary,
+                                  height: 1.15,
+                                  letterSpacing: -0.5,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.sm),
+                            FadeSlide(
+                              delay: const Duration(milliseconds: 220),
+                              child: const Text(
+                                'Peer-to-peer EV charging. Tap a plug, pay, charge.',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: AppColors.textSecondary,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: AppSpacing.xxl),
+  
+                            // Clean Floating White Card
+                            FadeSlide(
+                              delay: const Duration(milliseconds: 300),
+                              child: Container(
+                                padding: const EdgeInsets.all(24),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surface.withValues(alpha: 0.7),
+                                  borderRadius: BorderRadius.circular(24),
+                                  border: Border.all(color: AppColors.border),
+                                  boxShadow: AppSpacing.glow(
+                                    color: AppColors.accent,
+                                    strength: 0.08,
+                                  ),
+                                ),
+                                child: Column(
+                                  children: [
+                                    // Google Button
+                                    _buildGoogleButton(),
+                                    const SizedBox(height: AppSpacing.lg),
+  
+                                    // Divider
+                                    Row(children: [
+                                      const Expanded(child: Divider(color: AppColors.border)),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+                                        child: const Text(
+                                          'or phone number',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: AppColors.textMuted,
+                                          ),
+                                        ),
+                                      ),
+                                      const Expanded(child: Divider(color: AppColors.border)),
+                                    ]),
+                                    const SizedBox(height: AppSpacing.lg),
+  
+                                    // Phone input
+                                    _buildTextField(
+                                      controller: _phoneController,
+                                      hint: '+91 9876543210',
+                                      icon: Icons.phone_outlined,
+                                      keyboardType: TextInputType.phone,
+                                      enabled: !_otpSent,
+                                    ),
+  
+                                    // OTP input
+                                    if (_otpSent) ...[
+                                      const SizedBox(height: AppSpacing.md),
+                                      _buildTextField(
+                                        controller: _otpController,
+                                        hint: 'Enter 6-digit OTP',
+                                        icon: Icons.pin_outlined,
+                                        keyboardType: TextInputType.number,
+                                      ),
+                                    ],
+  
+                                    const SizedBox(height: AppSpacing.xl),
+  
+                                    // Action Button
+                                    _buildActionButton(),
+  
+                                    if (_otpSent) ...[
+                                      const SizedBox(height: AppSpacing.md),
+                                      GestureDetector(
+                                        onTap: () => setState(() { _otpSent = false; _otpController.clear(); _error = null; }),
+                                        child: const Text(
+                                          '← Change number',
+                                          style: TextStyle(
+                                            color: AppColors.accent,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+  
+                            if (_error != null) ...[
+                              const SizedBox(height: AppSpacing.md),
+                              FadeSlide(
+                                delay: Duration.zero,
+                                child: Container(
+                                  padding: const EdgeInsets.all(AppSpacing.md),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.dangerSoft,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(color: AppColors.danger.withValues(alpha: 0.4)),
+                                  ),
+                                  child: Row(children: [
+                                    const Icon(Icons.error_outline, color: AppColors.danger, size: 18),
+                                    const SizedBox(width: AppSpacing.sm),
+                                    Expanded(
+                                      child: Text(
+                                        _error!,
+                                        style: const TextStyle(
+                                          fontSize: 13,
+                                          color: AppColors.danger,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ),
+                                  ]),
+                                ),
+                              ),
+                            ],
+  
+                            const SizedBox(height: AppSpacing.xxxl),
+                            FadeSlide(
+                              delay: const Duration(milliseconds: 400),
+                              child: const Center(
+                                child: Text(
+                                  'By continuing you agree to our Infrastructure Terms.',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: AppColors.textMuted,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+          ),
+          if (_isLoading)
+            Positioned.fill(
+              child: Container(
+                color: AppColors.background.withValues(alpha: 0.6),
+                child: const Center(child: CircularProgressIndicator(color: AppColors.accent)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGoogleButton() {
+    return GestureDetector(
+      onTap: _isLoading ? null : _signInWithGoogle,
+      child: Container(
+        height: 54,
+        decoration: BoxDecoration(
+          color: AppColors.surfaceHigh,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppColors.borderStrong),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // Styled colored G icon
+            Image.network(
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/1024px-Google_%22G%22_logo.svg.png',
+              width: 18,
+              height: 18,
+              errorBuilder: (_, __, ___) => const Text('G', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+            ),
+            const SizedBox(width: AppSpacing.md),
+            const Text(
+              'Continue with Google',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextField({
+    required TextEditingController controller,
+    required String hint,
+    required IconData icon,
+    TextInputType keyboardType = TextInputType.text,
+    bool enabled = true,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: enabled ? AppColors.surfaceHigh : AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: TextField(
+        controller: controller,
+        keyboardType: keyboardType,
+        enabled: enabled,
+        style: TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w600,
+          color: enabled ? AppColors.textPrimary : AppColors.textMuted,
+        ),
+        decoration: InputDecoration(
+          filled: true,
+          fillColor: Colors.transparent,
+          hintText: hint,
+          hintStyle: const TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w500),
+          prefixIcon: Icon(icon, color: AppColors.textSecondary, size: 20),
+          border: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: AppSpacing.md),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionButton() {
+    return AppButton(
+      width: double.infinity,
+      loading: _isLoading,
+      label: _isLoading
+          ? (_otpSent ? 'Verifying…' : 'Sending OTP…')
+          : (_otpSent ? 'Verify OTP' : 'Send OTP'),
+      icon: _otpSent ? Icons.check_circle_outline : Icons.arrow_forward_rounded,
+      onPressed: _isLoading ? null : (_otpSent ? _verifyOtp : _sendOtp),
+    );
+  }
+}
+
+/// Full-screen wrapper for the native Clerk AuthView.
+/// Handles Google Sign-In and all Clerk auth methods.
+/// Navigates to '/' on successful sign-in.
+class _ClerkNativeSignInScreen extends StatefulWidget {
+  const _ClerkNativeSignInScreen();
+
+  @override
+  State<_ClerkNativeSignInScreen> createState() => _ClerkNativeSignInScreenState();
+}
+
+class _ClerkNativeSignInScreenState extends State<_ClerkNativeSignInScreen> {
+  final _channel = const MethodChannel('gridshare_mobile/clerk_auth');
+
+  @override
+  void initState() {
+    super.initState();
+    _channel.setMethodCallHandler(_handleNativeCall);
+  }
+
+  Future<void> _handleNativeCall(MethodCall call) async {
+    if (!mounted) return;
+    switch (call.method) {
+      case 'onSignInComplete':
+      case 'onSignUpComplete':
+        // Pop the sign-in screen and go to home
+        if (mounted) {
+          Navigator.of(context).pop();
+          context.go('/');
+        }
+        break;
+      case 'onSignInFailed':
+      case 'onSignUpFailed':
+        if (mounted) {
+          Navigator.of(context).pop();
+        }
+        break;
     }
   }
 
@@ -102,215 +527,26 @@ class _ClerkAuthScreenState extends ConsumerState<ClerkAuthScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          // Layered living background: aurora field + drifting spark dust.
-          Positioned.fill(
-            child: ShaderCanvas(
-              spec: ShaderSpec.aurora(),
-              fallback: AppColors.surfaceGradient,
-            ),
-          ),
-          Positioned.fill(
-            child: ShaderCanvas(
-              spec: ShaderSpec.spark(color: AppColors.accent, density: 0.5),
-              fallback: AppColors.surfaceGradient,
-            ),
-          ),
-          // Floating accent orb for depth.
-          Positioned(
-            top: -60,
-            right: -40,
-            child: PulseGlow(
-              color: AppColors.accent,
-              maxBlur: 90,
-              child: Container(
-                width: 180,
-                height: 180,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.accent.withValues(alpha: 0.10),
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -80,
-            left: -50,
-            child: PulseGlow(
-              color: AppColors.accentAlt,
-              maxBlur: 110,
-              child: Container(
-                width: 220,
-                height: 220,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppColors.accentAlt.withValues(alpha: 0.08),
-                ),
-              ),
-            ),
-          ),
-          // Legibility veil so content pops over the shader.
-          Positioned.fill(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    AppColors.background.withValues(alpha: 0.2),
-                    AppColors.background.withValues(alpha: 0.78),
-                  ],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                ),
-              ),
-            ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(AppSpacing.xl),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  return SingleChildScrollView(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                      child: IntrinsicHeight(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const SizedBox(height: AppSpacing.xxxl),
-                            FadeSlide(
-                              delay: const Duration(milliseconds: 80),
-                              child: Container(
-                                padding: const EdgeInsets.all(AppSpacing.md),
-                                decoration: BoxDecoration(
-                                  color: AppColors.accentSoft,
-                                  borderRadius: BorderRadius.circular(AppSpacing.rMd),
-                                  boxShadow: AppSpacing.glowSoft(),
-                                ),
-                                child: const Icon(Icons.bolt_rounded, color: AppColors.accent, size: 28),
-                              ),
-                            ),
-                            const SizedBox(height: AppSpacing.lg),
-                            FadeSlide(
-                              delay: const Duration(milliseconds: 160),
-                              child: GradientText(
-                                'Welcome to\nGridShare',
-                                style: AppTextStyles.display,
-                              ),
-                            ),
-                            const SizedBox(height: AppSpacing.sm),
-                            FadeSlide(
-                              delay: const Duration(milliseconds: 220),
-                              child: const Text('Peer-to-peer EV charging. Tap a plug, pay, charge.',
-                                  style: AppTextStyles.body),
-                            ),
-                            const Spacer(),
-                            // Clerk native sign-in/up view
-                            FadeSlide(
-                              delay: const Duration(milliseconds: 300),
-                              child: SizedBox(
-                                height: 380,
-                                child: _buildClerkView(),
-                              ),
-                            ),
-                            const SizedBox(height: AppSpacing.md),
-                            if (_error != null)
-                              FadeSlide(
-                                delay: const Duration(milliseconds: 380),
-                                child: Container(
-                                  padding: const EdgeInsets.all(AppSpacing.md),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.danger.withValues(alpha: 0.1),
-                                    borderRadius: BorderRadius.circular(AppSpacing.rMd),
-                                    border: Border.all(color: AppColors.danger.withValues(alpha: 0.3)),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      const Icon(Icons.error_outline, color: AppColors.danger, size: 20),
-                                      const SizedBox(width: AppSpacing.sm),
-                                      Expanded(child: Text(_error!, style: AppTextStyles.body.copyWith(color: AppColors.danger))),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            const SizedBox(height: AppSpacing.md),
-                            FadeSlide(
-                              delay: const Duration(milliseconds: 440),
-                              child: const Text('By continuing you agree to our Infrastructure Facility & Leasing terms.',
-                                  style: AppTextStyles.caption),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ],
+      backgroundColor: const Color(0xFFF5F5F5),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.close, color: Colors.black87),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: const Text(
+          'Sign in with Google',
+          style: TextStyle(color: Colors.black87, fontWeight: FontWeight.w600, fontSize: 17),
+        ),
+        centerTitle: true,
       ),
-    );
-  }
-
-  Widget _buildClerkView() {
-    // Use PlatformView to embed the native Android Clerk SignInOrUpView
-    if (Theme.of(context).platform == TargetPlatform.android) {
-      return AndroidView(
+      body: const AndroidView(
         viewType: 'gridshare_mobile/clerk_signin',
         layoutDirection: TextDirection.ltr,
-        creationParams: <String, dynamic>{},
-        creationParamsCodec: const StandardMessageCodec(),
-        onPlatformViewCreated: _onPlatformViewCreated,
-      );
-    }
-
-    // Fallback for iOS/Web - show a placeholder or use a different approach
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(Icons.lock_outline, size: 48, color: AppColors.textSecondary),
-          const SizedBox(height: AppSpacing.md),
-          Text('Clerk Auth requires Android', style: AppTextStyles.body),
-          const SizedBox(height: AppSpacing.md),
-          AppButton(
-            label: 'Continue with Google (Mock)',
-            width: 280,
-            onPressed: _mockSignIn,
-            icon: Icons.g_mobiledata_rounded,
-          ),
-        ],
+        creationParams: {},
+        creationParamsCodec: StandardMessageCodec(),
       ),
     );
-  }
-
-  void _onPlatformViewCreated(int id) {
-    // The Android view is created, we can send initialization params if needed
-    _channel.invokeMethod('initialize', {'viewId': id});
-  }
-
-  void _mockSignIn() async {
-    // For iOS/Web testing - mock a sign in
-    try {
-      // Use test user
-      final authService = ref.read(authServiceProvider);
-      final secureStorage = ref.read(secureStorageProvider);
-
-      await secureStorage.saveTokens(
-        accessToken: 'mock_clerk_token_user_1',
-        refreshToken: '',
-      );
-
-      final response = await authService.fetchUserWithBalance('user_1');
-      ref.read(currentUserProvider.notifier).state = response;
-      if (mounted) context.go('/');
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Mock sign in failed: $e';
-        });
-      }
-    }
   }
 }

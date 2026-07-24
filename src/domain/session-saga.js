@@ -67,7 +67,11 @@ export class SessionSaga {
     const payload = {
       userId: input.userId,
       amountCredits: input.amountCredits,
-      paymentId: input.paymentId
+      paymentId: input.paymentId,
+      // Funding rail: "upi" (Razorpay, default) or "usdc" (Stellar deposit).
+      // Both rails mint the SAME credit token; source is tracked off-chain
+      // only for the host's separate UPI / USDC earnings reporting.
+      source: input.source === "usdc" ? "usdc" : "upi"
     };
 
     const key = input.idempotencyKey ?? input.paymentId;
@@ -86,6 +90,7 @@ export class SessionSaga {
         userId: payload.userId,
         amountCredits: payload.amountCredits,
         paymentId: payload.paymentId,
+        source: payload.source,
         status: "confirmed",
         createdAt: now(),
         updatedAt: now()
@@ -94,13 +99,19 @@ export class SessionSaga {
       // Update local balance mirror
       await this.store.upsertWalletBalance(payload.userId, payload.amountCredits);
 
+      // Track funding provenance (buckets sum to the on-chain balance).
+      if (this.store.addSourceCredits) {
+        await this.store.addSourceCredits(payload.userId, payload.source, payload.amountCredits);
+      }
+
       this.eventBus.publish("wallet.topup", {
         userId: payload.userId,
         amountCredits: payload.amountCredits,
-        paymentId: payload.paymentId
+        paymentId: payload.paymentId,
+        source: payload.source
       });
 
-      return { userId: payload.userId, amountCredits: payload.amountCredits };
+      return { userId: payload.userId, amountCredits: payload.amountCredits, source: payload.source };
     });
   }
 
@@ -205,11 +216,21 @@ export class SessionSaga {
    * Replaces the old handlePaymentCaptured -> activatePaidSession flow.
    */
   async startSession(input) {
+    // Public entry: acquire the per-session lock, then run the shared body.
+    return this.withSessionLock(input.sessionId, () => this._startSessionLocked(input));
+  }
+
+  /**
+   * Start-session body. Assumes the caller ALREADY holds the session lock.
+   * Split out so reconcileSession (which already locks) can reuse it without
+   * re-entering withSessionLock — the non-reentrant LockManager would otherwise
+   * deadlock (reconcile holds session:<id>, startSession waits on the same key).
+   */
+  async _startSessionLocked(input) {
     const key = input.idempotencyKey ?? `start_${input.sessionId}`;
     const payload = { sessionId: input.sessionId };
 
-    return this.withSessionLock(payload.sessionId, () =>
-      this.idempotencyStore.run("session.start", key, payload, async () => {
+    return this.idempotencyStore.run("session.start", key, payload, async () => {
         const session = await this.store.requireSession(payload.sessionId);
 
         invariant(["created", "lock_failed"].includes(session.status), "SESSION_NOT_STARTABLE", "Only created or lock_failed sessions can be started.", {
@@ -300,8 +321,7 @@ export class SessionSaga {
 
           return { session: failed, chain: lockResult, refund };
         }
-      })
-    );
+      });
   }
 
   async ingestTelemetry(sessionId, input) {
@@ -397,7 +417,9 @@ export class SessionSaga {
       const session = await this.store.requireSession(sessionId);
 
       if (["created", "lock_failed"].includes(session.status)) {
-        const result = await this.startSession({ sessionId, idempotencyKey: `reconcile_${sessionId}` });
+        // Already inside the session lock — call the locked body directly to
+        // avoid re-entering withSessionLock (non-reentrant → would deadlock).
+        const result = await this._startSessionLocked({ sessionId, idempotencyKey: `reconcile_${sessionId}` });
         this.eventBus.publish("session.reconciled", {
           sessionId,
           fromStatus: session.status,
@@ -443,13 +465,16 @@ export class SessionSaga {
       }
     }
 
+    const recovered = results.filter((result) => result.ok && !result.result.skipped).length;
+    const failed = results.filter((result) => !result.ok).length;
+
     this.eventBus.publish("reconciliation.completed", {
       scanned: sessions.length,
-      recovered: results.filter((result) => result.ok && !result.result.skipped).length,
-      failed: results.filter((result) => !result.ok).length
+      recovered,
+      failed
     });
 
-    return { scanned: sessions.length, results };
+    return { scanned: sessions.length, recovered, failed, results };
   }
 
   async getSession(sessionId) {
@@ -560,6 +585,31 @@ export class SessionSaga {
       pendingOracleReport: null,
       failureCode: null
     });
+
+    // Attribute the host's earned credits to funding sources (UPI vs USDC) in
+    // proportion to the rider's current bucket ratio. On-chain credits are
+    // fungible; this off-chain split powers the host's separate earnings
+    // sections without changing the settlement ledger. Best-effort: a failure
+    // here must not undo a completed on-chain settlement.
+    const hostShareCredits = session.pendingSettlement?.hostShareCredits ?? 0;
+    if (this.store.transferSourceCredits && hostShareCredits > 0 && session.riderId && session.hostId) {
+      try {
+        const split = await this.store.transferSourceCredits(session.riderId, session.hostId, hostShareCredits);
+        this.eventBus.publish("wallet.earnings_attributed", {
+          sessionId: session.id,
+          hostId: session.hostId,
+          riderId: session.riderId,
+          hostShareCredits,
+          split
+        });
+      } catch (error) {
+        this.eventBus.publish("wallet.earnings_attribution_failed", {
+          sessionId: session.id,
+          hostId: session.hostId,
+          reason: error.code ?? error.message
+        });
+      }
+    }
 
     this.eventBus.publish("session.settled", {
       sessionId: session.id,

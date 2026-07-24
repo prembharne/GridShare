@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Razorpay Web Checkout</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <style>
+    body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f4f4f9; }
+    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }
+    button { background-color: #3399cc; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 4px; cursor: pointer; }
+    button:hover { background-color: #2b82ad; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Wallet Topup</h2>
+    <p>Amount: ₹100.00</p>
+    <button id="pay-btn">Pay with Razorpay</button>
+  </div>
+
+  <script>
+    document.getElementById('pay-btn').onclick = async function(e) {
+      e.preventDefault();
+      
+      // STEP 1: Create Order from Backend
+      try {
+        const response = await fetch('http://localhost:8080/wallet/topup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: 'rider_demo', amountCredits: 100 })
+        });
+        const result = await response.json();
+        
+        if (!result.ok) throw new Error("Failed to create order");
+        const order = result.data;
+
+        // STEP 2: Open Razorpay Checkout
+        var options = {
+          "key": "rzp_test_TF2vRTHMmIUlO3", // The key passed from backend or environment
+          "amount": order.amount,
+          "currency": order.currency,
+          "name": "GridShare App",
+          "description": "Wallet Topup",
+          "order_id": order.id,
+          "handler": async function (response) {
+            // STEP 3: Verify Signature on Backend
+            const verifyRes = await fetch('http://localhost:8080/wallet/topup/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_signature: response.razorpay_signature
+              })
+            });
+            const verifyData = await verifyRes.json();
+            
+            if (verifyData.ok) {
+              alert("Payment successful and verified!");
+            } else {
+              alert("Payment verification failed.");
+            }
+          },
+          "prefill": {
+            "name": "Demo Rider",
+            "email": "rider@example.com",
+            "contact": "9999999999"
+          },
+          "theme": {
+            "color": "#3399cc"
+          }
+        };
+        
+        var rzp1 = new Razorpay(options);
+        rzp1.on('payment.failed', function (response){
+          alert("Payment failed: " + response.error.description);
+        });
+        rzp1.open();
+        
+      } catch (err) {
+        alert("Error: " + err.message);
+      }
+    }
+  </script>
+</body>
+</html>

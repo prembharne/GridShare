@@ -1,4 +1,4 @@
-﻿import crypto from "node:crypto";
+import crypto from "node:crypto";
 import { DomainError } from "../core/errors.js";
 
 function timingSafeEqualHex(left, right) {
@@ -33,4 +33,10 @@ export function verifyRazorpayWebhook({ rawBody, signature, secret }) {
   }
 
   return { verified: true, skipped: false };
+}
+
+export function verifyRazorpaySignature(orderId, paymentId, signature, secret) {
+  if (!secret) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
+  return timingSafeEqualHex(expected, signature);
 }

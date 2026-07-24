@@ -1,0 +1,42 @@
+{
+  "project_info": {
+    "project_number": "959322421139",
+    "project_id": "gridshare-app",
+    "storage_bucket": "gridshare-app.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:959322421139:android:a1b2c3d4e5f60001",
+        "android_client_info": {
+          "package_name": "com.example.gridshare_mobile"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "959322421139-ljm30f0l25p7lor9gnqqi97sfviegqna.apps.googleusercontent.com",
+          "client_type": 3
+        },
+        {
+          "client_id": "959322421139-mhhs05aajieolsu2kkeqdg6dv6jteali.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.gridshare_mobile",
+            "certificate_hash": "1791bd22b7b4b3151fff4f79065049c1e7ed58a8"
+          }
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDummyKeyForGoogleServicesValidation0"
+        }
+      ],
+      "services": {
+        "analytics_service": {
+          "status": 1
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -98,9 +98,12 @@ class _FadeSlideState extends State<FadeSlide> with SingleTickerProviderStateMix
     // Skip delays in test mode to avoid pending timers
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      // In tests, skip delays to avoid pending timers
       if (widget.delay == Duration.zero || _isTestMode) {
         _ctrl.forward();
+      } else {
+        Future.delayed(widget.delay, () {
+          if (mounted) _ctrl.forward();
+        });
       }
     });
   }

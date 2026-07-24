@@ -11,6 +11,9 @@ import com.clerk.api.session.Session
 import com.clerk.api.user.User
 import com.clerk.ui.auth.AuthMode
 import com.clerk.ui.auth.AuthView
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
@@ -35,6 +38,13 @@ class ClerkSignInView(
     private var isSignedIn = false
 
     init {
+        channel.setMethodCallHandler { call, result ->
+            if (call.method == "initialize") {
+                result.success(null)
+            } else {
+                result.notImplemented()
+            }
+        }
         setupView()
     }
 
@@ -46,6 +56,19 @@ class ClerkSignInView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
 
+            // Fix for ComposeView rendering blank inside Flutter PlatformViews
+            var currentContext = context
+            while (currentContext is android.content.ContextWrapper) {
+                if (currentContext is androidx.lifecycle.LifecycleOwner &&
+                    currentContext is androidx.lifecycle.ViewModelStoreOwner &&
+                    currentContext is androidx.savedstate.SavedStateRegistryOwner) {
+                    this.setViewTreeLifecycleOwner(currentContext as androidx.lifecycle.LifecycleOwner)
+                    this.setViewTreeViewModelStoreOwner(currentContext as androidx.lifecycle.ViewModelStoreOwner)
+                    this.setViewTreeSavedStateRegistryOwner(currentContext as androidx.savedstate.SavedStateRegistryOwner)
+                    break
+                }
+                currentContext = currentContext.baseContext
+            }
             // Check if already signed in when view is attached
             addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) {

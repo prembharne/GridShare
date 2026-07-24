@@ -5,12 +5,12 @@ import 'app_text_styles.dart';
 
 /// Central AppTheme — one place that owns the look so every screen stays consistent.
 class AppTheme {
-  static ThemeData get dark {
+  static ThemeData get light {
     final base = ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: Brightness.light,
       scaffoldBackgroundColor: AppColors.background,
-      colorScheme: const ColorScheme.dark(
+      colorScheme: const ColorScheme.light(
         primary: AppColors.accent,
         secondary: AppColors.accentAlt,
         surface: AppColors.surface,
