@@ -8,7 +8,7 @@ import '../models/models.dart';
 String get _defaultBaseUrl {
   const envUrl = String.fromEnvironment('API_BASE_URL');
   if (envUrl.isNotEmpty) return envUrl;
-  return 'http://172.28.159.86:8080';
+  return 'https://gridshare-backend.onrender.com';
 }
 
 /// Centralised HTTP client with auth, idempotency keys, and error mapping.
