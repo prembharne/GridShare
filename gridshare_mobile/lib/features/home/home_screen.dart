@@ -54,40 +54,51 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Future<void> _fetchLiveLocation() async {
     try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-
-      if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-        final pos = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
-          timeLimit: const Duration(seconds: 8),
-        );
-        if (mounted) {
-          setState(() {
-            _userLocation = LatLng(pos.latitude, pos.longitude);
-          });
-          _mapController.move(_userLocation, 15.0);
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (serviceEnabled) {
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
         }
-        return;
-      }
-    } catch (_) {}
 
-    // Fallback to IP geolocation if GPS is unavailable
-    try {
-      final response = await http.get(Uri.parse('http://ip-api.com/json')).timeout(const Duration(seconds: 4));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['status'] == 'success') {
-          final lat = (data['lat'] as num).toDouble();
-          final lon = (data['lon'] as num).toDouble();
+        if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+          final lastPos = await Geolocator.getLastKnownPosition();
+          if (lastPos != null && mounted) {
+            setState(() {
+              _userLocation = LatLng(lastPos.latitude, lastPos.longitude);
+            });
+            _mapController.move(_userLocation, 15.0);
+          }
+
+          final pos = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.medium,
+            timeLimit: const Duration(seconds: 8),
+          );
           if (mounted) {
             setState(() {
-              _userLocation = LatLng(lat, lon);
+              _userLocation = LatLng(pos.latitude, pos.longitude);
             });
-            _mapController.move(_userLocation, 14.0);
+            _mapController.move(_userLocation, 15.0);
           }
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] Live location error: $e');
+    }
+
+    // Fallback to HTTPS IP geolocation if GPS is unavailable
+    try {
+      final response = await http.get(Uri.parse('https://ipapi.co/json/')).timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final lat = (data['latitude'] as num?)?.toDouble();
+        final lon = (data['longitude'] as num?)?.toDouble();
+        if (lat != null && lon != null && mounted) {
+          setState(() {
+            _userLocation = LatLng(lat, lon);
+          });
+          _mapController.move(_userLocation, 14.0);
         }
       }
     } catch (_) {}

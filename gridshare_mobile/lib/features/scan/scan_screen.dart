@@ -113,6 +113,21 @@ class _ScanScreenState extends State<ScanScreen> {
               height: 260,
               child: MobileScanner(
                 controller: _cameraController,
+                errorBuilder: (context, error, child) {
+                  return Container(
+                    color: Colors.black,
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.qr_code_scanner_rounded, size: 48, color: AppColors.accent),
+                          SizedBox(height: 8),
+                          Text('Align QR Code', style: TextStyle(color: Colors.white, fontSize: 14)),
+                        ],
+                      ),
+                    ),
+                  );
+                },
                 onDetect: (capture) {
                   if (_scanned) return;
                   final List<Barcode> barcodes = capture.barcodes;

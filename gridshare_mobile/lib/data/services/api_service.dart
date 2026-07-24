@@ -226,7 +226,7 @@ class ApiService {
                 'assetCode': assetCode,
               }),
             )
-            .timeout(const Duration(seconds: 4));
+            .timeout(const Duration(seconds: 25));
         final data = _check(res);
         return UsdcIntent.fromJson(data['data'] as Map<String, dynamic>);
       } catch (e) {
@@ -445,7 +445,7 @@ class ApiService {
                 'lng': lng ?? 72.8777,
               }),
             )
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 25));
         final data = _check(res);
         return Outlet.fromJson(data['data']['outlet'] as Map<String, dynamic>);
       } catch (e) {
