@@ -63,12 +63,28 @@ class ApiService {
     required String phone,
     String? idempotencyKey,
   }) async {
-    final res = await _client.post(
-      Uri.parse('$_baseUrl/api/auth/send-otp'),
-      headers: _headers(idempotencyKey: idempotencyKey),
-      body: jsonEncode({'phone': phone}),
-    );
-    return AuthResponse.fromJson(_check(res));
+    final urls = [
+      '$_baseUrl/api/auth/send-otp',
+      if (!_baseUrl.contains('gridshare-backend.onrender.com'))
+        'https://gridshare-backend.onrender.com/api/auth/send-otp',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(idempotencyKey: idempotencyKey),
+              body: jsonEncode({'phone': phone}),
+            )
+            .timeout(const Duration(seconds: 15));
+        return AuthResponse.fromJson(_check(res));
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed to send OTP.');
   }
 
   /// POST /api/auth/verify-otp — Verify OTP and return JWT + user.
@@ -77,12 +93,28 @@ class ApiService {
     required String otp,
     String? idempotencyKey,
   }) async {
-    final res = await _client.post(
-      Uri.parse('$_baseUrl/api/auth/verify-otp'),
-      headers: _headers(idempotencyKey: idempotencyKey),
-      body: jsonEncode({'phone': phone, 'otp': otp}),
-    );
-    return AuthResponse.fromJson(_check(res));
+    final urls = [
+      '$_baseUrl/api/auth/verify-otp',
+      if (!_baseUrl.contains('gridshare-backend.onrender.com'))
+        'https://gridshare-backend.onrender.com/api/auth/verify-otp',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(idempotencyKey: idempotencyKey),
+              body: jsonEncode({'phone': phone, 'otp': otp}),
+            )
+            .timeout(const Duration(seconds: 15));
+        return AuthResponse.fromJson(_check(res));
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed to verify OTP.');
   }
 
   // ============================ WALLET ============================

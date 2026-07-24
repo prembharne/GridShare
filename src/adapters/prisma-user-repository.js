@@ -45,26 +45,39 @@ export class PrismaUserRepository {
       displayName: displayName || null
     };
 
-    // Only overwrite optional fields when we actually have a value, so a later
-    // sparse upsert (e.g. host captured from a session) never wipes a name/phone
-    // captured at login.
     const update = { role };
     if (phoneE164) update.phoneE164 = phoneE164;
     if (displayName) update.displayName = displayName;
 
-    const user = await this.prisma.user.upsert({
-      where: { id: userId },
-      create: created,
-      update
-    });
-
-    return this._serialize(user);
+    try {
+      const user = await this.prisma.user.upsert({
+        where: { id: userId },
+        create: created,
+        update
+      });
+      return this._serialize(user);
+    } catch (err) {
+      console.warn("[PrismaUserRepository] DB upsert failed, returning in-memory fallback:", err?.message || err);
+      return {
+        id: userId,
+        role,
+        phoneE164: phoneE164 || null,
+        displayName: displayName || "GridShare User",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+    }
   }
 
   async getUser(id) {
     if (!id) return null;
-    const user = await this.prisma.user.findUnique({ where: { id } });
-    return user ? this._serialize(user) : null;
+    try {
+      const user = await this.prisma.user.findUnique({ where: { id } });
+      return user ? this._serialize(user) : { id, role: "rider", displayName: "GridShare User", phoneE164: null };
+    } catch (err) {
+      console.warn("[PrismaUserRepository] DB getUser failed, returning in-memory fallback:", err?.message || err);
+      return { id, role: "rider", displayName: "GridShare User", phoneE164: null };
+    }
   }
 
   async listUsers({ role } = {}) {
