@@ -498,18 +498,34 @@ class ApiService {
 
   void dispose() => _client.close();
 
-  /// Generic POST request for custom endpoints (e.g., Clerk token exchange)
+  /// Generic POST request for custom endpoints (e.g., Clerk token exchange / Google sign-in)
   Future<Map<String, dynamic>> post({
     required String path,
     required Map<String, dynamic> body,
     String? idempotencyKey,
   }) async {
-    final res = await _client.post(
-      Uri.parse('$_baseUrl$path'),
-      headers: _headers(idempotencyKey: idempotencyKey),
-      body: jsonEncode(body),
-    );
-    return _check(res) as Map<String, dynamic>;
+    final urls = [
+      '$_baseUrl$path',
+      if (!_baseUrl.contains('gridshare-backend.onrender.com'))
+        'https://gridshare-backend.onrender.com$path',
+    ];
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(idempotencyKey: idempotencyKey),
+              body: jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 15));
+        return _check(res) as Map<String, dynamic>;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ?? Exception('Failed request to $path.');
   }
 }
 
