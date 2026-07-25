@@ -12,7 +12,8 @@
     "check:artifacts": "node scripts/check-production-artifacts.js",
     "docs:bundle": "node scripts/sync-markdown-bundle.js",
     "db:migrate": "node scripts/migrate.js",
-    "db:seed": "node scripts/seed.js"
+    "db:seed": "node scripts/seed.js",
+    "postinstall": "prisma generate || echo \"prisma generate skipped\""
   },
   "engines": {
     "node": ">=20"
