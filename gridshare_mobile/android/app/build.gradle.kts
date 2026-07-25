@@ -34,6 +34,14 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
+        // Gradle 9.1's stripReleaseDebugSymbols task crashes on the NDK .so strip
+        // step ("Failed to create MD5 hash for ...libflutter.so.temp-stream").
+        // Setting debugSymbolLevel = none makes the build emit already-stripped
+        // libs, so that broken task is skipped AND the APK stays small.
+        ndk {
+            debugSymbolLevel = "none"
+        }
+
         // Clerk publishable key - read directly from local.properties file
         val localProperties = Properties()
         val localPropertiesFile = rootProject.file("local.properties")

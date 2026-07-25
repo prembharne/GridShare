@@ -6,7 +6,7 @@ import '../models/models.dart';
 
 /// Canonical production backend. Used as the default and as the guaranteed
 /// fallback host so a physical phone never ends up pointing at `localhost`.
-const String kProductionBaseUrl = 'https://gridshare-backend.onrender.com';
+const String kProductionBaseUrl = 'https://gridshare-production.up.railway.app';
 
 String get _defaultBaseUrl {
   const envUrl = String.fromEnvironment('API_BASE_URL');
@@ -170,8 +170,8 @@ class ApiService {
   }) async {
     final urls = [
       '$_baseUrl/api/auth/send-otp',
-      if (!_baseUrl.contains('gridshare-backend.onrender.com'))
-        'https://gridshare-backend.onrender.com/api/auth/send-otp',
+      if (!_baseUrl.contains('gridshare-production.up.railway.app'))
+        'https://gridshare-production.up.railway.app/api/auth/send-otp',
     ];
 
     Object? lastError;
@@ -200,8 +200,8 @@ class ApiService {
   }) async {
     final urls = [
       '$_baseUrl/api/auth/verify-otp',
-      if (!_baseUrl.contains('gridshare-backend.onrender.com'))
-        'https://gridshare-backend.onrender.com/api/auth/verify-otp',
+      if (!_baseUrl.contains('gridshare-production.up.railway.app'))
+        'https://gridshare-production.up.railway.app/api/auth/verify-otp',
     ];
 
     Object? lastError;
@@ -574,8 +574,8 @@ class ApiService {
   }) async {
     final urls = [
       '$_baseUrl$path',
-      if (!_baseUrl.contains('gridshare-backend.onrender.com'))
-        'https://gridshare-backend.onrender.com$path',
+      if (!_baseUrl.contains('gridshare-production.up.railway.app'))
+        'https://gridshare-production.up.railway.app$path',
     ];
 
     Object? lastError;

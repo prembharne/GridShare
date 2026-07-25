@@ -2,7 +2,11 @@
 // Run: npx prisma generate && npx prisma db push
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // Railway's Nixpacks runtime ships OpenSSL 3.x (no libssl.so.1.1), so the
+  // default engine fails to load. Bundle the OpenSSL 3.0 engines for both the
+  // musl and debian bases Prisma may detect there, plus native for local dev.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
 
 datasource db {
