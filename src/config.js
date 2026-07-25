@@ -69,6 +69,9 @@ export function loadConfig(env = process.env) {
     adapterRetryBaseDelayMs: integerFromEnv(env, "GRIDSHARE_ADAPTER_RETRY_BASE_DELAY_MS", 0, { min: 0, max: 5000 }),
     pricePerKwhCredits: integerFromEnv(env, "GRIDSHARE_PRICE_PER_KWH_CREDITS", 18, { min: 1 }),
     serviceFeeBps: integerFromEnv(env, "GRIDSHARE_SERVICE_FEE_BPS", 125, { min: 0, max: 10000 }),
+    // How often the SessionMeter ticks per-minute sessions (auto-stop clock).
+    meterIntervalMs: integerFromEnv(env, "GRIDSHARE_METER_INTERVAL_MS", 15000, { min: 1000, max: 300000 }),
+
     useRealAdapters: booleanFromEnv(env, "GRIDSHARE_USE_REAL_ADAPTERS", false),
     databaseUrl: stringFromEnv(env, "DATABASE_URL", "postgres://gridshare:gridshare_dev_password@localhost:5432/gridshare"),
     stellarRpcUrl: stringFromEnv(env, "STELLAR_RPC_URL", "https://soroban-testnet.stellar.org"),
@@ -82,8 +85,8 @@ export function loadConfig(env = process.env) {
     tuyaEndpoint: stringFromEnv(env, "TUYA_ENDPOINT", "https://openapi.tuyacn.com"),
     tuyaDeviceId: stringFromEnv(env, "TUYA_DEVICE_ID", ""),
     tuyaWebhookSecret: stringFromEnv(env, "TUYA_WEBHOOK_SECRET", ""),
-    razorpayKeyId: stringFromEnv(env, "RAZORPAY_KEY_ID", ""),
-    razorpayKeySecret: stringFromEnv(env, "RAZORPAY_KEY_SECRET", ""),
+    razorpayKeyId: stringFromEnv(env, "RAZORPAY_KEY_ID", "rzp_test_TF2vRTHMmIUlO3"),
+    razorpayKeySecret: stringFromEnv(env, "RAZORPAY_KEY_SECRET", "5HjlT2I6eWxK0oTnVuV88jQT"),
     razorpayWebhookSecret: stringFromEnv(env, "RAZORPAY_WEBHOOK_SECRET", ""),
     // ── Instamojo UPI payment gateway ──
     instamojoApiKey: stringFromEnv(env, "INSTAMOJO_API_KEY", ""),

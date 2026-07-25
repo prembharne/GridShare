@@ -10,7 +10,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
-
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_spacing.dart';
@@ -38,8 +38,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   /// Role state lifted here so the nav bar can react to it.
   bool _isHost = false;
-  Outlet? _selectedRouteDestination;
   List<LatLng> _routePoints = [];
+
   bool _routeLoading = false;
 
   LatLng _userLocation = const LatLng(18.5204, 73.8567); // Default location
@@ -61,7 +61,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           permission = await Geolocator.requestPermission();
         }
 
-        if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+        if (permission == LocationPermission.whileInUse ||
+            permission == LocationPermission.always) {
           final lastPos = await Geolocator.getLastKnownPosition();
           if (lastPos != null && mounted) {
             setState(() {
@@ -89,7 +90,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     // Fallback to HTTPS IP geolocation if GPS is unavailable
     try {
-      final response = await http.get(Uri.parse('https://ipapi.co/json/')).timeout(const Duration(seconds: 5));
+      final response = await http
+          .get(Uri.parse('https://ipapi.co/json/'))
+          .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final lat = (data['latitude'] as num?)?.toDouble();
@@ -103,8 +106,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
     } catch (_) {}
   }
-
-
 
   Future<void> _load() async {
     if (!mounted) return;
@@ -183,9 +184,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             children: [
               // Soft background ambient orbs
               Positioned(
-                top: -80, right: -80,
+                top: -80,
+                right: -80,
                 child: Container(
-                  width: 280, height: 280,
+                  width: 280,
+                  height: 280,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: AppColors.accent.withValues(alpha: 0.10),
@@ -193,9 +196,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
               ),
               Positioned(
-                bottom: -100, left: -60,
+                bottom: -100,
+                left: -60,
                 child: Container(
-                  width: 320, height: 320,
+                  width: 320,
+                  height: 320,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: AppColors.accentBlue.withValues(alpha: 0.08),
@@ -221,9 +226,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   color: AppColors.textPrimary,
                                   letterSpacing: -0.5,
                                 ),
-                              ).animate()
-                               .fadeIn(duration: 500.ms)
-                               .slideX(begin: -0.15, curve: Curves.easeOutCubic),
+                              ).animate().fadeIn(duration: 500.ms).slideX(
+                                  begin: -0.15, curve: Curves.easeOutCubic),
                               Text(
                                 '${_outlets?.length ?? 0} plugs around you',
                                 style: const TextStyle(
@@ -231,8 +235,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   color: AppColors.textSecondary,
                                   fontWeight: FontWeight.w500,
                                 ),
-                              ).animate()
-                               .fadeIn(delay: 150.ms, duration: 500.ms),
+                              )
+                                  .animate()
+                                  .fadeIn(delay: 150.ms, duration: 500.ms),
                             ],
                           ),
                           const Spacer(),
@@ -245,7 +250,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                 child: Container(
                                   decoration: BoxDecoration(
                                     shape: BoxShape.circle,
-                                    border: Border.all(color: _navAccent.withValues(alpha: 0.5)),
+                                    border: Border.all(
+                                        color:
+                                            _navAccent.withValues(alpha: 0.5)),
                                   ),
                                   child: Center(
                                     child: Text(
@@ -274,11 +281,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   child: Column(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
-                                      const Icon(Icons.cloud_off_rounded, size: 64, color: AppColors.textMuted),
+                                      const Icon(Icons.cloud_off_rounded,
+                                          size: 64, color: AppColors.textMuted),
                                       const SizedBox(height: 16),
                                       const Text(
                                         'Failed to load nearby plugs',
-                                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
+                                        style: TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold,
+                                            color: AppColors.textPrimary),
                                       ),
                                       const SizedBox(height: 8),
                                       ElevatedButton(
@@ -295,20 +306,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               : (_outlets == null || _outlets!.isEmpty)
                                   ? Center(
                                       child: Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
                                         children: [
-                                          const Icon(Icons.pin_drop_outlined, size: 64, color: AppColors.textMuted),
+                                          const Icon(Icons.pin_drop_outlined,
+                                              size: 64,
+                                              color: AppColors.textMuted),
                                           const SizedBox(height: 16),
                                           const Text(
                                             'No plugs nearby right now',
-                                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
+                                            style: TextStyle(
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold,
+                                                color: AppColors.textPrimary),
                                           ),
                                           const SizedBox(height: 8),
                                           ElevatedButton(
                                             onPressed: _load,
                                             style: ElevatedButton.styleFrom(
                                               backgroundColor: _navAccent,
-                                              foregroundColor: AppColors.background,
+                                              foregroundColor:
+                                                  AppColors.background,
                                             ),
                                             child: const Text('Refresh'),
                                           )
@@ -327,164 +345,175 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           );
           break;
 
-      case 1:
-        // Maps tab — bright voyager theme map
-        body = Stack(
-          children: [
-            FlutterMap(
-              mapController: _mapController,
-              options: MapOptions(
-                initialCenter: _userLocation,
-                initialZoom: 13.0,
-              ),
-              children: [
-                TileLayer(
-                  urlTemplate: 'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.example.gridshare_mobile',
-                  maxNativeZoom: 18,
+        case 1:
+          // Maps tab — bright voyager theme map
+          body = Stack(
+            children: [
+              FlutterMap(
+                mapController: _mapController,
+                options: MapOptions(
+                  initialCenter: _userLocation,
+                  initialZoom: 13.0,
                 ),
-                // Outlet marker layer
-                if (!_isHost && _outlets != null)
-                  MarkerLayer(
-                    markers: _outlets!.map((o) {
-                      return Marker(
-                        point: _getOutletLocation(o),
-                        width: 38,
-                        height: 38,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () => _showSheet(o),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: o.available
-                                  ? AppColors.accentSoft
-                                  : AppColors.dangerSoft,
-                              border: Border.all(
-                                color: o.available ? AppColors.accent : AppColors.danger,
-                                width: 2.5,
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: (o.available ? AppColors.accent : AppColors.danger)
-                                      .withValues(alpha: 0.4),
-                                  blurRadius: 12,
-                                  spreadRadius: -2,
-                                  offset: const Offset(0, 4),
+                children: [
+                  TileLayer(
+                    urlTemplate:
+                        'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+                    userAgentPackageName: 'com.example.gridshare_mobile',
+                    maxNativeZoom: 18,
+                  ),
+                  // Outlet marker layer
+                  if (!_isHost && _outlets != null)
+                    MarkerLayer(
+                      markers: _outlets!.map((o) {
+                        return Marker(
+                          point: _getOutletLocation(o),
+                          width: 38,
+                          height: 38,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => _showSheet(o),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: o.available
+                                    ? AppColors.accentSoft
+                                    : AppColors.dangerSoft,
+                                border: Border.all(
+                                  color: o.available
+                                      ? AppColors.accent
+                                      : AppColors.danger,
+                                  width: 2.5,
                                 ),
-                              ],
-                            ),
-                            child: Icon(
-                              Icons.electrical_services_rounded,
-                              color: o.available ? AppColors.accent : AppColors.danger,
-                              size: 18,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: (o.available
+                                            ? AppColors.accent
+                                            : AppColors.danger)
+                                        .withValues(alpha: 0.4),
+                                    blurRadius: 12,
+                                    spreadRadius: -2,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: Icon(
+                                Icons.electrical_services_rounded,
+                                color: o.available
+                                    ? AppColors.accent
+                                    : AppColors.danger,
+                                size: 18,
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                // Current location blue dot
-                MarkerLayer(
-                  markers: [
-                    Marker(
-                      point: _userLocation,
-                      width: 24,
-                      height: 24,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: const Color(0xFF007AFF),
-                          border: Border.all(color: Colors.white, width: 3),
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(0xFF007AFF).withOpacity(0.5),
-                              blurRadius: 10,
-                              spreadRadius: 2,
-                            ),
-                          ],
-                        ),
-                      ),
+                        );
+                      }).toList(),
                     ),
-                  ],
-                ),
-                // Road route polyline from OSRM
-                if (!_isHost && _routePoints.isNotEmpty)
-                  PolylineLayer<Object>(
-                    polylines: [
-                      Polyline(
-                        points: _routePoints,
-                        color: AppColors.accent,
-                        strokeWidth: 5.0,
-                        borderColor: AppColors.accentBlue,
-                        borderStrokeWidth: 1.5,
+                  // Current location blue dot
+                  MarkerLayer(
+                    markers: [
+                      Marker(
+                        point: _userLocation,
+                        width: 24,
+                        height: 24,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: const Color(0xFF007AFF),
+                            border: Border.all(color: Colors.white, width: 3),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF007AFF).withOpacity(0.5),
+                                blurRadius: 10,
+                                spreadRadius: 2,
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ],
                   ),
-              ],
-            ),
-          ],
-        );
-
-        // Add route-loading banner on top of map
-        if (_routeLoading) {
-          body = Stack(
-            children: [
-              body,
-              Positioned(
-                bottom: 100,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: AppColors.surfaceHigh,
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(color: AppColors.accent.withValues(alpha: 0.4)),
-                      boxShadow: AppSpacing.glow(color: AppColors.accent, strength: 0.25),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 16, height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: AppColors.accent,
-                          ),
-                        ),
-                        SizedBox(width: 10),
-                        Text(
-                          'Finding best route...',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
-                          ),
+                  // Road route polyline from OSRM
+                  if (!_isHost && _routePoints.isNotEmpty)
+                    PolylineLayer<Object>(
+                      polylines: [
+                        Polyline(
+                          points: _routePoints,
+                          color: AppColors.accent,
+                          strokeWidth: 5.0,
+                          borderColor: AppColors.accentBlue,
+                          borderStrokeWidth: 1.5,
                         ),
                       ],
                     ),
-                  ),
-                ),
+                ],
               ),
             ],
           );
-        }
-        break;
 
-      case 2:
-      default:
-        body = ProfileScreen(
-          isHost: _isHost,
-          onRoleChanged: (isHost) {
-            setState(() {
-              _isHost = isHost;
-              _currentIndex = isHost ? 1 : 2;
-            });
-          },
-        );
-        break;
+          // Add route-loading banner on top of map
+          if (_routeLoading) {
+            body = Stack(
+              children: [
+                body,
+                Positioned(
+                  bottom: 100,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppColors.surfaceHigh,
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(
+                            color: AppColors.accent.withValues(alpha: 0.4)),
+                        boxShadow: AppSpacing.glow(
+                            color: AppColors.accent, strength: 0.25),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.accent,
+                            ),
+                          ),
+                          SizedBox(width: 10),
+                          Text(
+                            'Finding best route...',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+          break;
+
+        case 2:
+        default:
+          body = ProfileScreen(
+            isHost: _isHost,
+            onRoleChanged: (isHost) {
+              setState(() {
+                _isHost = isHost;
+                _currentIndex = isHost ? 1 : 2;
+              });
+            },
+          );
+          break;
       }
     }
 
@@ -494,27 +523,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            AppColors.surface,     // #161F30 — subtle lift at top
-            AppColors.background,  // #0B0F19 — deep navy base
+            AppColors.surface, // #161F30 — subtle lift at top
+            AppColors.background, // #0B0F19 — deep navy base
           ],
         ),
       ),
       child: Scaffold(
         backgroundColor: Colors.transparent,
         body: body,
-        floatingActionButton: (_isHost ? _currentIndex == 0 : _currentIndex != 2)
-            ? FloatingActionButton.extended(
-                backgroundColor: _navAccent,
-                foregroundColor: AppColors.background,
-                elevation: 4,
-                onPressed: () => _isHost ? null : context.push('/scan'),
-                icon: Icon(_isHost ? Icons.add_location_alt_rounded : Icons.qr_code_2_rounded),
-                label: Text(
-                  _isHost ? 'Add Listing' : 'Scan',
-                  style: const TextStyle(fontWeight: FontWeight.bold, letterSpacing: 0.5),
-                ),
-              )
-            : null,
+        floatingActionButton:
+            (_isHost ? _currentIndex == 0 : _currentIndex != 2)
+                ? FloatingActionButton.extended(
+                    backgroundColor: _navAccent,
+                    foregroundColor: AppColors.background,
+                    elevation: 4,
+                    onPressed: () => _isHost ? null : context.push('/scan'),
+                    icon: Icon(_isHost
+                        ? Icons.add_location_alt_rounded
+                        : Icons.qr_code_2_rounded),
+                    label: Text(
+                      _isHost ? 'Add Listing' : 'Scan',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, letterSpacing: 0.5),
+                    ),
+                  )
+                : null,
         bottomNavigationBar: ClipRRect(
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
@@ -539,20 +572,54 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 elevation: 0,
                 selectedItemColor: _navAccent,
                 unselectedItemColor: AppColors.textMuted,
-                selectedLabelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+                selectedLabelStyle:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
                 unselectedLabelStyle: const TextStyle(fontSize: 11),
                 items: _navItems,
               ),
             ),
           ),
-        ).animate().slideY(begin: 1.0, duration: 800.ms, curve: Curves.easeOutExpo),
+        )
+            .animate()
+            .slideY(begin: 1.0, duration: 800.ms, curve: Curves.easeOutExpo),
       ),
     );
   }
 
+  /// Open the device's native maps app (Google Maps / Apple Maps) with
+  /// turn-by-turn navigation to the outlet. Uses the outlet's real
+  /// coordinates and falls back to a plain geo: query if the maps URL can't
+  /// be launched. Returns true if a maps app was opened.
+  Future<bool> _launchExternalMaps(Outlet o) async {
+    final loc = _getOutletLocation(o);
+    final lat = loc.latitude;
+    final lng = loc.longitude;
+    final label = Uri.encodeComponent(o.name);
+
+    // Prefer Google Maps directions (works on Android + iOS + web), then a
+    // generic geo: URI as a fallback for other installed navigation apps.
+    final candidates = <Uri>[
+      Uri.parse(
+          'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng&travelmode=driving'),
+      Uri.parse('geo:$lat,$lng?q=$lat,$lng($label)'),
+    ];
+
+    for (final uri in candidates) {
+      if (await canLaunchUrl(uri)) {
+        final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (ok) return true;
+      }
+    }
+    return false;
+  }
+
   Future<void> _getDirections(Outlet o) async {
+    // Try to hand off to a real navigation app first; if none is available we
+    // fall back to drawing the route on the in-app map below.
+    final launched = await _launchExternalMaps(o);
+    if (launched) return;
+
     setState(() {
-      _selectedRouteDestination = o;
       _routePoints = [];
       _routeLoading = true;
       _currentIndex = 1;
@@ -566,13 +633,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           '${origin.longitude},${origin.latitude};'
           '${dest.longitude},${dest.latitude}'
           '?overview=full&geometries=geojson';
-      final response = await http.get(Uri.parse(url))
-          .timeout(const Duration(seconds: 10));
+      final response =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final coords = data['routes'][0]['geometry']['coordinates'] as List;
         final points = coords
-            .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+            .map((c) =>
+                LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
             .toList();
         if (mounted) setState(() => _routePoints = points);
       }
@@ -580,9 +648,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // Fallback: draw straight line if routing fails
       if (mounted) {
         setState(() => _routePoints = [
-          const LatLng(20.5937, 78.9629),
-          _getOutletLocation(o),
-        ]);
+              const LatLng(20.5937, 78.9629),
+              _getOutletLocation(o),
+            ]);
       }
     } finally {
       if (mounted) setState(() => _routeLoading = false);
@@ -639,17 +707,20 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
   }
 
   void _openAddListing() {
-    Navigator.of(context, rootNavigator: true).push(
-      PageRouteBuilder(
-        pageBuilder: (_, __, ___) => IoTConfigScreen(),
-        transitionsBuilder: (_, anim, __, child) => SlideTransition(
-          position: anim.drive(
-            Tween(begin: const Offset(1, 0), end: Offset.zero).chain(CurveTween(curve: Curves.easeOutCubic)),
+    Navigator.of(context, rootNavigator: true)
+        .push(
+          PageRouteBuilder(
+            pageBuilder: (_, __, ___) => IoTConfigScreen(),
+            transitionsBuilder: (_, anim, __, child) => SlideTransition(
+              position: anim.drive(
+                Tween(begin: const Offset(1, 0), end: Offset.zero)
+                    .chain(CurveTween(curve: Curves.easeOutCubic)),
+              ),
+              child: child,
+            ),
           ),
-          child: child,
-        ),
-      ),
-    ).then((_) => _fetchHostListings());
+        )
+        .then((_) => _fetchHostListings());
   }
 
   @override
@@ -660,9 +731,11 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
     return Stack(
       children: [
         Positioned(
-          top: -100, right: -100,
+          top: -100,
+          right: -100,
           child: Container(
-            width: 320, height: 320,
+            width: 320,
+            height: 320,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: AppColors.hostAccent.withValues(alpha: 0.12),
@@ -688,7 +761,10 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                             color: AppColors.textPrimary,
                             letterSpacing: -0.5,
                           ),
-                        ).animate().fadeIn(duration: 600.ms).slideX(begin: -0.2, curve: Curves.easeOutQuart),
+                        )
+                            .animate()
+                            .fadeIn(duration: 600.ms)
+                            .slideX(begin: -0.2, curve: Curves.easeOutQuart),
                         const Text(
                           'Manage your GridShare plug points',
                           style: TextStyle(
@@ -711,7 +787,6 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                   ],
                 ),
                 const SizedBox(height: AppSpacing.xl),
-
                 if (_loading)
                   const Center(child: CircularProgressIndicator())
                 else if (activeCount == 0)
@@ -721,7 +796,8 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                       color: AppColors.surface.withValues(alpha: 0.7),
                       borderRadius: BorderRadius.circular(24),
                       border: Border.all(color: AppColors.border),
-                      boxShadow: AppSpacing.glow(color: accentColor, strength: 0.08),
+                      boxShadow:
+                          AppSpacing.glow(color: accentColor, strength: 0.08),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -735,7 +811,8 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                                 color: accentColor.withValues(alpha: 0.14),
                                 borderRadius: BorderRadius.circular(16),
                               ),
-                              child: Icon(Icons.add_home_work_rounded, color: accentColor, size: 26),
+                              child: Icon(Icons.add_home_work_rounded,
+                                  color: accentColor, size: 26),
                             ),
                             const SizedBox(width: AppSpacing.md),
                             const Column(
@@ -743,11 +820,17 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                               children: [
                                 Text(
                                   'No active listings',
-                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
+                                  style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: AppColors.textPrimary),
                                 ),
                                 Text(
                                   'Add your first charging point',
-                                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary, fontWeight: FontWeight.w500),
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: AppColors.textSecondary,
+                                      fontWeight: FontWeight.w500),
                                 ),
                               ],
                             ),
@@ -762,11 +845,13 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                             style: ElevatedButton.styleFrom(
                               backgroundColor: accentColor,
                               foregroundColor: AppColors.background,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16)),
                               elevation: 0,
                             ),
                             icon: const Icon(Icons.add_location_alt_rounded),
-                            label: const Text('Add Listing', style: TextStyle(fontWeight: FontWeight.bold)),
+                            label: const Text('Add Listing',
+                                style: TextStyle(fontWeight: FontWeight.bold)),
                           ),
                         ),
                       ],
@@ -781,7 +866,8 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                         decoration: BoxDecoration(
                           color: AppColors.surface,
                           borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+                          border: Border.all(
+                              color: accentColor.withValues(alpha: 0.3)),
                           boxShadow: AppSpacing.glowSoft(color: accentColor),
                         ),
                         child: Column(
@@ -796,32 +882,46 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                                     color: accentColor.withValues(alpha: 0.14),
                                     borderRadius: BorderRadius.circular(14),
                                   ),
-                                  child: Icon(Icons.power_rounded, color: accentColor, size: 26),
+                                  child: Icon(Icons.power_rounded,
+                                      color: accentColor, size: 26),
                                 ),
                                 const SizedBox(width: AppSpacing.md),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         outlet.name,
-                                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
+                                        style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.bold,
+                                            color: AppColors.textPrimary),
                                       ),
                                       const SizedBox(height: 2),
                                       Text(
                                         'Device ID: d72c4dd24f074a08fdwvz4',
-                                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, fontFamily: 'monospace'),
+                                        style: const TextStyle(
+                                            fontSize: 12,
+                                            color: AppColors.textSecondary,
+                                            fontFamily: 'monospace'),
                                       ),
                                     ],
                                   ),
                                 ),
                                 Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 4),
                                   decoration: BoxDecoration(
-                                    color: AppColors.accent.withValues(alpha: 0.15),
+                                    color: AppColors.accent
+                                        .withValues(alpha: 0.15),
                                     borderRadius: BorderRadius.circular(12),
                                   ),
-                                  child: const Text('🟢 Online', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.accent)),
+                                  child: const Text('🟢 Online',
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: AppColors.accent)),
                                 ),
                               ],
                             ),
@@ -829,8 +929,15 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                Text('Rate: ${outlet.ratePerKwh} credits/kWh', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                                Text(outlet.connectorType ?? '16A Socket', style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                                Text('Rate: ${outlet.ratePerKwh} credits/kWh',
+                                    style: const TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                        color: AppColors.textPrimary)),
+                                Text(outlet.connectorType ?? '16A Socket',
+                                    style: const TextStyle(
+                                        fontSize: 12,
+                                        color: AppColors.textSecondary)),
                               ],
                             ),
                           ],
@@ -838,11 +945,14 @@ class _HostListingsTabState extends ConsumerState<_HostListingsTab> {
                       );
                     }).toList(),
                   ),
-
                 const SizedBox(height: AppSpacing.lg),
                 const Text(
                   'QUICK STATS',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.textMuted, letterSpacing: 0.8),
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textMuted,
+                      letterSpacing: 0.8),
                 ).animate().fadeIn(delay: 250.ms),
                 const SizedBox(height: AppSpacing.sm),
                 Row(
@@ -880,7 +990,11 @@ class _QuickStat extends StatelessWidget {
   final String value;
   final IconData icon;
   final Color color;
-  const _QuickStat({required this.label, required this.value, required this.icon, required this.color});
+  const _QuickStat(
+      {required this.label,
+      required this.value,
+      required this.icon,
+      required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -898,11 +1012,15 @@ class _QuickStat extends StatelessWidget {
           const SizedBox(height: AppSpacing.xs),
           Text(
             value,
-            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: color),
+            style: TextStyle(
+                fontSize: 28, fontWeight: FontWeight.w800, color: color),
           ),
           Text(
             label,
-            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, fontWeight: FontWeight.w500),
+            style: const TextStyle(
+                fontSize: 12,
+                color: AppColors.textSecondary,
+                fontWeight: FontWeight.w500),
             textAlign: TextAlign.center,
           ),
         ],
@@ -920,7 +1038,8 @@ class _OutletList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
       itemCount: outlets.length,
       separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.md),
       itemBuilder: (_, i) {
@@ -948,7 +1067,8 @@ class _OutletList extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: statusColor.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(AppSpacing.rSm),
-                        border: Border.all(color: statusColor.withValues(alpha: 0.25)),
+                        border: Border.all(
+                            color: statusColor.withValues(alpha: 0.25)),
                       ),
                       child: Icon(
                         Icons.electrical_services_rounded,
@@ -969,27 +1089,33 @@ class _OutletList extends StatelessWidget {
                           const SizedBox(height: 4),
                           Row(
                             children: [
-                              const Icon(Icons.near_me_rounded, size: 13, color: AppColors.textSecondary),
+                              const Icon(Icons.near_me_rounded,
+                                  size: 13, color: AppColors.textSecondary),
                               const SizedBox(width: 4),
                               Text(
                                 '${o.distanceKm.toStringAsFixed(1)} km',
-                                style: AppTextStyles.body.copyWith(fontSize: 13),
+                                style:
+                                    AppTextStyles.body.copyWith(fontSize: 13),
                               ),
                               const SizedBox(width: 8),
-                              const Icon(Icons.star_rounded, size: 14, color: AppColors.warning),
+                              const Icon(Icons.star_rounded,
+                                  size: 14, color: AppColors.warning),
                               const SizedBox(width: 2),
                               Text(
                                 o.rating.toStringAsFixed(1),
-                                style: AppTextStyles.body.copyWith(fontSize: 13),
+                                style:
+                                    AppTextStyles.body.copyWith(fontSize: 13),
                               ),
                             ],
                           ),
                           const SizedBox(height: 8),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 3),
                             decoration: BoxDecoration(
                               color: statusColor.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(AppSpacing.rPill),
+                              borderRadius:
+                                  BorderRadius.circular(AppSpacing.rPill),
                             ),
                             child: Text(
                               o.available ? 'Available' : 'In use',
@@ -1022,9 +1148,9 @@ class _OutletList extends StatelessWidget {
             ),
           ),
         )
-         .animate(delay: (80 * i).ms)
-         .fadeIn(duration: 450.ms)
-         .slideY(begin: 0.15, curve: Curves.easeOutCubic);
+            .animate(delay: (80 * i).ms)
+            .fadeIn(duration: 450.ms)
+            .slideY(begin: 0.15, curve: Curves.easeOutCubic);
       },
     );
   }

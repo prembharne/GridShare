@@ -1,9 +1,5 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'models/models.dart';
 import 'services/api_service.dart';
@@ -19,7 +15,10 @@ final httpClientProvider = Provider<http.Client>((ref) {
 String get _resolvedApiBaseUrl {
   const envUrl = String.fromEnvironment('API_BASE_URL');
   if (envUrl.isNotEmpty) return envUrl;
-  return 'http://localhost:8080';
+  // Default to the deployed backend so release APKs on real phones work even
+  // when built without `--dart-define=API_BASE_URL=...`. Point this at a
+  // localhost URL only for local emulator development via --dart-define.
+  return kProductionBaseUrl;
 }
 
 final String apiBaseUrl = _resolvedApiBaseUrl;
@@ -35,13 +34,17 @@ final apiServiceProvider = Provider<ApiService>((ref) {
 /// Secure storage for JWT tokens
 final secureStorageProvider = Provider<SecureStorage>((ref) => SecureStorage());
 
-
 /// Real service providers (swap MockOutletService → OutletService, etc.)
-final outletServiceProvider = Provider<OutletService>((ref) => OutletService(ref.watch(apiServiceProvider)));
-final sessionServiceProvider = Provider<SessionService>((ref) => SessionService(ref.watch(apiServiceProvider)));
-final telemetryServiceProvider = Provider<TelemetryService>((ref) => TelemetryService());
-final authServiceProvider = Provider<AuthService>((ref) => AuthService(ref.watch(apiServiceProvider), ref.watch(secureStorageProvider)));
-final hostServiceProvider = Provider<HostService>((ref) => HostService(ref.watch(apiServiceProvider)));
+final outletServiceProvider = Provider<OutletService>(
+    (ref) => OutletService(ref.watch(apiServiceProvider)));
+final sessionServiceProvider = Provider<SessionService>(
+    (ref) => SessionService(ref.watch(apiServiceProvider)));
+final telemetryServiceProvider =
+    Provider<TelemetryService>((ref) => TelemetryService());
+final authServiceProvider = Provider<AuthService>((ref) => AuthService(
+    ref.watch(apiServiceProvider), ref.watch(secureStorageProvider)));
+final hostServiceProvider =
+    Provider<HostService>((ref) => HostService(ref.watch(apiServiceProvider)));
 
 /// Current user state (auth + wallet balance)
 final currentUserProvider = StateProvider<User?>((_) => null);

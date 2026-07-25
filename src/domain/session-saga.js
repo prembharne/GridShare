@@ -1,7 +1,12 @@
 import crypto from "node:crypto";
 import { invariant } from "../core/errors.js";
 import { computeSettlement } from "./settlement-math.js";
+import {
+  computeTimeSettlement,
+  activeSecondsBetween
+} from "./time-settlement-math.js";
 import { INVOICE_DESCRIPTION, assertComplianceCopy } from "./compliance.js";
+
 
 function now() {
   return new Date().toISOString();
@@ -179,7 +184,13 @@ export class SessionSaga {
       riderId: input.riderId,
       hostId: input.hostId,
       outletId: input.outletId,
-      depositCredits: input.depositCredits
+      depositCredits: input.depositCredits,
+      // Per-minute billing (optional). When ratePerMinuteCredits is provided the
+      // session bills by elapsed active minutes; otherwise it falls back to the
+      // legacy energy-based model. selectedDurationMinutes lets the rider cap the
+      // charge to a chosen duration (auto-stops at that point).
+      ratePerMinuteCredits: input.ratePerMinuteCredits,
+      selectedDurationMinutes: input.selectedDurationMinutes
     };
 
     return this.idempotencyStore.run("session.intent", input.idempotencyKey, payload, async () => {
@@ -188,12 +199,33 @@ export class SessionSaga {
       invariant(payload.outletId, "INVALID_OUTLET", "outletId is required.");
       invariant(Number.isInteger(payload.depositCredits) && payload.depositCredits > 0, "INVALID_DEPOSIT", "depositCredits must be a positive integer.");
 
+      const billByTime =
+        payload.ratePerMinuteCredits !== undefined &&
+        payload.ratePerMinuteCredits !== null;
+      if (billByTime) {
+        invariant(
+          Number.isInteger(payload.ratePerMinuteCredits) && payload.ratePerMinuteCredits >= 0,
+          "INVALID_RATE",
+          "ratePerMinuteCredits must be a non-negative integer."
+        );
+      }
+      if (payload.selectedDurationMinutes !== undefined && payload.selectedDurationMinutes !== null) {
+        invariant(
+          Number.isInteger(payload.selectedDurationMinutes) && payload.selectedDurationMinutes > 0,
+          "INVALID_DURATION",
+          "selectedDurationMinutes must be a positive integer."
+        );
+      }
+
       const session = await this.store.createSession({
         id: input.sessionId ?? createSessionId(),
         riderId: payload.riderId,
         hostId: payload.hostId,
         outletId: payload.outletId,
         depositCredits: payload.depositCredits,
+        billingMode: billByTime ? "per_minute" : "energy",
+        ratePerMinuteCredits: billByTime ? payload.ratePerMinuteCredits : null,
+        selectedDurationMinutes: payload.selectedDurationMinutes ?? null,
         status: "created",
         createdAt: now(),
         updatedAt: now()
@@ -204,12 +236,16 @@ export class SessionSaga {
         riderId: session.riderId,
         hostId: session.hostId,
         outletId: session.outletId,
-        depositCredits: session.depositCredits
+        depositCredits: session.depositCredits,
+        billingMode: session.billingMode,
+        ratePerMinuteCredits: session.ratePerMinuteCredits,
+        selectedDurationMinutes: session.selectedDurationMinutes
       });
 
       return { session };
     });
   }
+
 
   /**
    * Start a session: check rider balance, lock credits, turn hardware ON.
@@ -231,97 +267,97 @@ export class SessionSaga {
     const payload = { sessionId: input.sessionId };
 
     return this.idempotencyStore.run("session.start", key, payload, async () => {
-        const session = await this.store.requireSession(payload.sessionId);
+      const session = await this.store.requireSession(payload.sessionId);
 
-        invariant(["created", "lock_failed"].includes(session.status), "SESSION_NOT_STARTABLE", "Only created or lock_failed sessions can be started.", {
+      invariant(["created", "lock_failed"].includes(session.status), "SESSION_NOT_STARTABLE", "Only created or lock_failed sessions can be started.", {
+        sessionId: session.id,
+        status: session.status
+      });
+
+      // Pre-check: rider must have enough credits in wallet
+      const wallet = await this.chain.balanceOf(session.riderId);
+      if (wallet < session.depositCredits) {
+        await this.store.updateSession(session.id, {
+          status: "lock_failed",
+          failureCode: "INSUFFICIENT_BALANCE"
+        });
+        this.eventBus.publish("session.reconciliation_needed", {
           sessionId: session.id,
-          status: session.status
+          status: "lock_failed",
+          failureCode: "INSUFFICIENT_BALANCE"
+        });
+        throw new Error("INSUFFICIENT_BALANCE");
+      }
+
+      // Lock credits from rider's wallet
+      let lockResult;
+      try {
+        lockResult = await this.chain.lockDeposit({
+          sessionId: session.id,
+          riderId: session.riderId,
+          hostId: session.hostId,
+          depositCredits: session.depositCredits
+        });
+      } catch (error) {
+        await this.store.updateSession(session.id, {
+          status: "lock_failed",
+          failureCode: error.code ?? "CHAIN_LOCK_FAILED"
+        });
+        this.eventBus.publish("session.reconciliation_needed", {
+          sessionId: session.id,
+          status: "lock_failed",
+          failureCode: error.code ?? "CHAIN_LOCK_FAILED"
+        });
+        throw error;
+      }
+
+      // Turn hardware ON
+      try {
+        const hardwareCommand = await this.hardware.setSwitch({
+          outletId: session.outletId,
+          desiredState: true,
+          reason: "session_started",
+          sessionId: session.id
         });
 
-        // Pre-check: rider must have enough credits in wallet
-        const wallet = await this.chain.balanceOf(session.riderId);
-        if (wallet < session.depositCredits) {
-          await this.store.updateSession(session.id, {
-            status: "lock_failed",
-            failureCode: "INSUFFICIENT_BALANCE"
-          });
-          this.eventBus.publish("session.reconciliation_needed", {
-            sessionId: session.id,
-            status: "lock_failed",
-            failureCode: "INSUFFICIENT_BALANCE"
-          });
-          throw new Error("INSUFFICIENT_BALANCE");
-        }
+        const activated = await this.store.updateSession(session.id, {
+          status: "active",
+          escrowLockTxHash: lockResult.txHash,
+          hardwareOnCommandId: hardwareCommand.id,
+          activeAt: now(),
+          failureCode: null
+        });
 
-        // Lock credits from rider's wallet
-        let lockResult;
-        try {
-          lockResult = await this.chain.lockDeposit({
-            sessionId: session.id,
-            riderId: session.riderId,
-            hostId: session.hostId,
-            depositCredits: session.depositCredits
-          });
-        } catch (error) {
-          await this.store.updateSession(session.id, {
-            status: "lock_failed",
-            failureCode: error.code ?? "CHAIN_LOCK_FAILED"
-          });
-          this.eventBus.publish("session.reconciliation_needed", {
-            sessionId: session.id,
-            status: "lock_failed",
-            failureCode: error.code ?? "CHAIN_LOCK_FAILED"
-          });
-          throw error;
-        }
+        this.eventBus.publish("session.activated", {
+          sessionId: session.id,
+          escrowLockTxHash: lockResult.txHash,
+          hardwareOnCommandId: hardwareCommand.id
+        });
 
-        // Turn hardware ON
-        try {
-          const hardwareCommand = await this.hardware.setSwitch({
-            outletId: session.outletId,
-            desiredState: true,
-            reason: "session_started",
-            sessionId: session.id
-          });
+        return { session: activated, chain: lockResult, hardware: hardwareCommand };
+      } catch (error) {
+        // On hardware failure, refund the locked credits to rider
+        const refund = await this.chain.refundDeposit({
+          sessionId: session.id,
+          reason: "hardware_activation_failed"
+        });
 
-          const activated = await this.store.updateSession(session.id, {
-            status: "active",
-            escrowLockTxHash: lockResult.txHash,
-            hardwareOnCommandId: hardwareCommand.id,
-            activeAt: now(),
-            failureCode: null
-          });
+        const failed = await this.store.updateSession(session.id, {
+          status: "refunded_after_activation_failure",
+          escrowLockTxHash: lockResult.txHash,
+          refundTxHash: refund.txHash,
+          failureCode: error.code ?? "HARDWARE_COMMAND_FAILED"
+        });
 
-          this.eventBus.publish("session.activated", {
-            sessionId: session.id,
-            escrowLockTxHash: lockResult.txHash,
-            hardwareOnCommandId: hardwareCommand.id
-          });
+        this.eventBus.publish("session.activation_failed_refunded", {
+          sessionId: session.id,
+          refundTxHash: refund.txHash,
+          failureCode: failed.failureCode
+        });
 
-          return { session: activated, chain: lockResult, hardware: hardwareCommand };
-        } catch (error) {
-          // On hardware failure, refund the locked credits to rider
-          const refund = await this.chain.refundDeposit({
-            sessionId: session.id,
-            reason: "hardware_activation_failed"
-          });
-
-          const failed = await this.store.updateSession(session.id, {
-            status: "refunded_after_activation_failure",
-            escrowLockTxHash: lockResult.txHash,
-            refundTxHash: refund.txHash,
-            failureCode: error.code ?? "HARDWARE_COMMAND_FAILED"
-          });
-
-          this.eventBus.publish("session.activation_failed_refunded", {
-            sessionId: session.id,
-            refundTxHash: refund.txHash,
-            failureCode: failed.failureCode
-          });
-
-          return { session: failed, chain: lockResult, refund };
-        }
-      });
+        return { session: failed, chain: lockResult, refund };
+      }
+    });
   }
 
   async ingestTelemetry(sessionId, input) {
@@ -347,6 +383,18 @@ export class SessionSaga {
           hardwareAlreadyOff: true,
           telemetry
         });
+      }
+
+      // Per-minute sessions bill by elapsed time, not energy: the SessionMeter
+      // (tickSession) owns auto-stop. Here we only record telemetry for live
+      // dashboards and return a time-based preview.
+      if (session.billingMode === "per_minute") {
+        const preview = this._computeSettlementFor(session, { stoppedAt: now() });
+        return {
+          session: await this.store.requireSession(sessionId),
+          telemetry,
+          settlementPreview: preview
+        };
       }
 
       const preview = computeSettlement({
@@ -376,6 +424,7 @@ export class SessionSaga {
         telemetry,
         settlementPreview: preview
       };
+
     });
   }
 
@@ -501,7 +550,95 @@ export class SessionSaga {
     };
   }
 
-  async stopAndSettle({ session, reason, stopKind, hardwareAlreadyOff = false, telemetry }) {
+  /**
+   * Choose the settlement model for a session. Per-minute sessions (created with
+   * ratePerMinuteCredits) bill by elapsed active seconds; everything else keeps
+   * the legacy energy-based settlement so existing flows are unchanged.
+   */
+  _computeSettlementFor(session, { energyWh = 0, stoppedAt = now() } = {}) {
+    if (session.billingMode === "per_minute" && session.ratePerMinuteCredits != null) {
+      const activeSeconds = activeSecondsBetween(session.activeAt, stoppedAt);
+      return computeTimeSettlement({
+        depositCredits: session.depositCredits,
+        activeSeconds,
+        ratePerMinuteCredits: session.ratePerMinuteCredits,
+        serviceFeeBps: this.config.serviceFeeBps
+      });
+    }
+    return computeSettlement({
+      depositCredits: session.depositCredits,
+      energyWh,
+      pricePerKwhCredits: this.config.pricePerKwhCredits,
+      serviceFeeBps: this.config.serviceFeeBps
+    });
+  }
+
+  /**
+   * Per-minute meter tick. Pure clock math (no hardware dependency): for an
+   * active per-minute session it computes the live charge and auto-stops when
+   * either the rider's selected duration elapses or the accrued charge reaches
+   * the locked deposit. Non-per-minute or non-active sessions are a no-op.
+   * Safe to call repeatedly (e.g. from the SessionMeter scheduler).
+   */
+  async tickSession(sessionId) {
+    return this.withSessionLock(sessionId, async () => {
+      const session = await this.store.requireSession(sessionId);
+      if (session.status !== "active" || session.billingMode !== "per_minute") {
+        return { session, skipped: true };
+      }
+
+      const activeSeconds = activeSecondsBetween(session.activeAt, now());
+
+      const durationElapsed =
+        session.selectedDurationMinutes != null &&
+        activeSeconds >= session.selectedDurationMinutes * 60;
+
+      // When the rider's selected duration has elapsed, bill EXACTLY that
+      // duration rather than the (rounded-up) overshoot: the tick may fire a
+      // few seconds late, and partial minutes round up, so using the raw
+      // elapsed time would over-charge by a whole minute. Clamp the settlement
+      // clock to the selected-duration boundary.
+      const settleAt = durationElapsed
+        ? new Date(new Date(session.activeAt).getTime() + session.selectedDurationMinutes * 60000).toISOString()
+        : now();
+      const preview = this._computeSettlementFor(session, { stoppedAt: settleAt });
+
+      const depositReached = preview.amountDueCredits >= session.depositCredits;
+
+      if (durationElapsed || depositReached) {
+        const reason = durationElapsed ? "duration_elapsed" : "prepaid_threshold_reached";
+
+        this.eventBus.publish("session.auto_stop", {
+          sessionId,
+          reason,
+          activeSeconds,
+          amountDueCredits: preview.amountDueCredits,
+          depositCredits: session.depositCredits
+        });
+        return this.stopAndSettle({
+          session,
+          reason,
+          stopKind: durationElapsed ? "auto_timer" : "auto_threshold",
+          // Bill to the clamped boundary, not the (late) wall-clock tick time.
+          stoppedAt: settleAt
+        });
+
+      }
+
+      this.eventBus.publish("session.meter_tick", {
+        sessionId,
+        activeSeconds,
+        billedMinutes: preview.billedMinutes,
+        amountDueCredits: preview.amountDueCredits,
+        remainingCredits: session.depositCredits - preview.amountDueCredits
+      });
+
+      return { session, meter: preview, activeSeconds };
+    });
+  }
+
+  async stopAndSettle({ session, reason, stopKind, hardwareAlreadyOff = false, telemetry, stoppedAt }) {
+
     const latestTelemetry = telemetry ?? (await this.store.getLatestTelemetry(session.id)) ?? {
       energyWh: 0,
       currentAmp: 0,
@@ -520,14 +657,17 @@ export class SessionSaga {
       });
     }
 
-    const settlement = computeSettlement({
-      depositCredits: session.depositCredits,
+    // Per-minute auto-stops pass a clamped stoppedAt (the selected-duration
+    // boundary) so the settlement bills exactly the chosen duration. All other
+    // stops settle as of now().
+    const settlement = this._computeSettlementFor(session, {
       energyWh: latestTelemetry.energyWh,
-      pricePerKwhCredits: this.config.pricePerKwhCredits,
-      serviceFeeBps: this.config.serviceFeeBps
+      stoppedAt: stoppedAt ?? now()
     });
 
+
     assertComplianceCopy(INVOICE_DESCRIPTION);
+
 
     const oracleReport = {
       source: "gridshare-difficult-core",

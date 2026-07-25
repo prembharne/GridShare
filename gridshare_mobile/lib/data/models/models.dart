@@ -27,7 +27,8 @@ class Outlet {
   final double lat;
   final double lng;
   final double distanceKm;
-  final double ratePerKwh; // billed as service fee, not electricity (credits/kWh)
+  final double
+      ratePerKwh; // billed as service fee, not electricity (credits/kWh)
   final bool available;
   final String? connectorType; // e.g. "16A BIS Smart Plug"
   final double rating;
@@ -72,7 +73,17 @@ class Outlet {
       };
 }
 
-enum SessionStatus { pending, created, active, stopping, settled, cancelled, tripped, lock_failed, refunded_after_activation_failure }
+enum SessionStatus {
+  pending,
+  created,
+  active,
+  stopping,
+  settled,
+  cancelled,
+  tripped,
+  lock_failed,
+  refunded_after_activation_failure
+}
 
 extension SessionStatusX on SessionStatus {
   String get label {
@@ -107,11 +118,18 @@ class Session {
   final String id;
   final String outletId;
   final SessionStatus status;
-  final int depositCredits;       // credits locked at session start
-  final int? spentCredits;        // credits consumed so far (from telemetry)
-  final double? energyKwh;        // energy delivered so far
-  final DateTime? startedAt;      // when hardware turned ON
-  final DateTime? settledAt;      // when settled on-chain
+  final int depositCredits; // credits locked at session start
+  final int? spentCredits; // credits consumed so far (from telemetry)
+  final double? energyKwh; // energy delivered so far
+  final DateTime? startedAt; // when hardware turned ON
+  final DateTime? settledAt; // when settled on-chain
+
+  // Per-minute billing (null on legacy energy-billed sessions). When
+  // [billingMode] == 'per_minute' the rider is charged [ratePerMinuteCredits]
+  // per elapsed minute, auto-stopping after [selectedDurationMinutes].
+  final String billingMode; // 'per_minute' | 'energy'
+  final int? ratePerMinuteCredits;
+  final int? selectedDurationMinutes;
 
   const Session({
     required this.id,
@@ -122,6 +140,9 @@ class Session {
     this.energyKwh,
     this.startedAt,
     this.settledAt,
+    this.billingMode = 'energy',
+    this.ratePerMinuteCredits,
+    this.selectedDurationMinutes,
   });
 
   factory Session.fromJson(Map<String, dynamic> j) => Session(
@@ -131,11 +152,23 @@ class Session {
           (e) => e.name == (j['status'] as String).toLowerCase(),
           orElse: () => SessionStatus.pending,
         ),
-        depositCredits: (j['depositCredits'] as num?)?.toInt() ?? (j['prepaidAmount'] as num?)?.toInt() ?? 0,
-        spentCredits: (j['spentCredits'] as num?)?.toInt() ?? (j['spent'] as num?)?.toInt(),
-        energyKwh: (j['energyKwh'] as num?)?.toDouble() ?? (j['energy'] as num?)?.toDouble(),
-        startedAt: j['startedAt'] != null ? DateTime.parse(j['startedAt'] as String) : null,
-        settledAt: j['settledAt'] != null ? DateTime.parse(j['settledAt'] as String) : null,
+        depositCredits: (j['depositCredits'] as num?)?.toInt() ??
+            (j['prepaidAmount'] as num?)?.toInt() ??
+            0,
+        spentCredits: (j['spentCredits'] as num?)?.toInt() ??
+            (j['spent'] as num?)?.toInt(),
+        energyKwh: (j['energyKwh'] as num?)?.toDouble() ??
+            (j['energy'] as num?)?.toDouble(),
+        startedAt: j['startedAt'] != null
+            ? DateTime.parse(j['startedAt'] as String)
+            : null,
+        settledAt: j['settledAt'] != null
+            ? DateTime.parse(j['settledAt'] as String)
+            : null,
+        billingMode: j['billingMode'] as String? ?? 'energy',
+        ratePerMinuteCredits: (j['ratePerMinuteCredits'] as num?)?.toInt(),
+        selectedDurationMinutes:
+            (j['selectedDurationMinutes'] as num?)?.toInt(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -147,22 +180,29 @@ class Session {
         'energyKwh': energyKwh,
         'startedAt': startedAt?.toIso8601String(),
         'settledAt': settledAt?.toIso8601String(),
+        'billingMode': billingMode,
+        'ratePerMinuteCredits': ratePerMinuteCredits,
+        'selectedDurationMinutes': selectedDurationMinutes,
       };
 
   /// Back-compat for old UI code
   double get prepaidAmount => depositCredits.toDouble();
   double get spent => (spentCredits ?? 0).toDouble();
   DateTime get startedAtOrNow => startedAt ?? DateTime.now();
-  double get progress => depositCredits > 0 ? (spentCredits ?? 0) / depositCredits : 0.0;
+  double get progress =>
+      depositCredits > 0 ? (spentCredits ?? 0) / depositCredits : 0.0;
+
+  bool get isPerMinute =>
+      billingMode == 'per_minute' && ratePerMinuteCredits != null;
 }
 
 /// Telemetry from IoT device (Tuya smart plug → TimescaleDB).
 /// Field names match backend: energyWh, currentAmp, voltageV, tempC.
 class Telemetry {
-  final int energyWh;      // cumulative energy in Wh
+  final int energyWh; // cumulative energy in Wh
   final double currentAmp; // instantaneous current in A
-  final double voltageV;   // instantaneous voltage in V
-  final double tempC;      // temperature in °C
+  final double voltageV; // instantaneous voltage in V
+  final double tempC; // temperature in °C
   final DateTime sampledAt;
 
   const Telemetry({
@@ -175,11 +215,26 @@ class Telemetry {
 
   factory Telemetry.fromJson(Map<String, dynamic> j) {
     // Accept both snake_case (backend) and camelCase (legacy)
-    final energyWh = (j['energyWh'] as num?)?.toInt() ?? (j['energy_wh'] as num?)?.toInt() ?? 0;
-    final currentAmp = (j['currentAmp'] as num?)?.toDouble() ?? (j['current_amp'] as num?)?.toDouble() ?? (j['current'] as num?)?.toDouble() ?? 0;
-    final voltageV = (j['voltageV'] as num?)?.toDouble() ?? (j['voltage_v'] as num?)?.toDouble() ?? (j['voltage'] as num?)?.toDouble() ?? 0;
-    final tempC = (j['tempC'] as num?)?.toDouble() ?? (j['temp_c'] as num?)?.toDouble() ?? (j['temp'] as num?)?.toDouble() ?? 0;
-    final sampledAt = DateTime.tryParse(j['sampledAt'] as String? ?? j['sampled_at'] as String? ?? j['ts'] as String? ?? '') ?? DateTime.now();
+    final energyWh = (j['energyWh'] as num?)?.toInt() ??
+        (j['energy_wh'] as num?)?.toInt() ??
+        0;
+    final currentAmp = (j['currentAmp'] as num?)?.toDouble() ??
+        (j['current_amp'] as num?)?.toDouble() ??
+        (j['current'] as num?)?.toDouble() ??
+        0;
+    final voltageV = (j['voltageV'] as num?)?.toDouble() ??
+        (j['voltage_v'] as num?)?.toDouble() ??
+        (j['voltage'] as num?)?.toDouble() ??
+        0;
+    final tempC = (j['tempC'] as num?)?.toDouble() ??
+        (j['temp_c'] as num?)?.toDouble() ??
+        (j['temp'] as num?)?.toDouble() ??
+        0;
+    final sampledAt = DateTime.tryParse(j['sampledAt'] as String? ??
+            j['sampled_at'] as String? ??
+            j['ts'] as String? ??
+            '') ??
+        DateTime.now();
 
     return Telemetry(
       energyWh: energyWh,
@@ -218,7 +273,10 @@ class User {
         id: j['id'] as String,
         name: j['name'] as String,
         phone: j['phone'] as String,
-        walletBalanceCredits: (j['walletBalanceCredits'] as num?)?.toInt() ?? (j['balanceCredits'] as num?)?.toInt() ?? (j['walletBalance'] as num?)?.toInt() ?? 0,
+        walletBalanceCredits: (j['walletBalanceCredits'] as num?)?.toInt() ??
+            (j['balanceCredits'] as num?)?.toInt() ??
+            (j['walletBalance'] as num?)?.toInt() ??
+            0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -230,7 +288,8 @@ class User {
 
   double get walletBalanceInr => walletBalanceCredits.toDouble();
 
-  User copyWith({String? id, String? name, String? phone, int? walletBalanceCredits}) {
+  User copyWith(
+      {String? id, String? name, String? phone, int? walletBalanceCredits}) {
     return User(
       id: id ?? this.id,
       name: name ?? this.name,

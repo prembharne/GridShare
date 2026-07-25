@@ -2,7 +2,8 @@ import http from "node:http";
 import { URL } from "node:url";
 import { DomainError, invariant, toErrorResponse } from "./core/errors.js";
 import { verifyRazorpayWebhook, verifyRazorpaySignature } from "./security/razorpay-webhook.js";
-import { OUTLET_CATALOG, toNearbyPayload } from "./domain/outlet-catalog.js";
+import { OUTLET_CATALOG, toNearbyPayload, findOutlet } from "./domain/outlet-catalog.js";
+
 
 async function readRaw(req, limitBytes) {
   const chunks = [];
@@ -212,6 +213,28 @@ export function createHttpServer(app) {
         });
       }
 
+      // Live per-outlet telemetry snapshot (switch state, power, current,
+      // voltage, energy) for the rider/host dashboards. Routes to the outlet's
+      // own Tuya device via the hardware bridge; works in mock mode too.
+      const liveOutletMatch = url.pathname.match(/^\/outlets\/([^/]+)\/live$/);
+      if (req.method === "GET" && liveOutletMatch) {
+        const outletId = decodeURIComponent(liveOutletMatch[1]);
+        const outlet = findOutlet(outletId);
+        invariant(outlet, "OUTLET_NOT_FOUND", "Outlet was not found.");
+        if (typeof app.hardware?.getLiveStatus !== "function") {
+          return sendJson(res, 501, {
+            ok: false,
+            error: { code: "NOT_IMPLEMENTED", message: "Live status not available for this hardware bridge." }
+          });
+        }
+        const live = await app.hardware.getLiveStatus(outletId);
+        return sendJson(res, 200, {
+          ok: true,
+          data: { outlet: toNearbyPayload(outlet), live }
+        });
+      }
+
+
       if (req.method === "POST" && url.pathname === "/outlets") {
         const body = await readJson(req, bodyLimitBytes);
         invariant(body.name, "INVALID_NAME", "Device name is required.");
@@ -347,17 +370,30 @@ export function createHttpServer(app) {
 
       if (req.method === "POST" && url.pathname === "/wallet/topup") {
         const body = await readJson(req, bodyLimitBytes);
+        const amountCredits = Math.floor(Number(body.amountCredits));
+        invariant(Number.isInteger(amountCredits) && amountCredits > 0, "INVALID_AMOUNT", "amountCredits must be a positive integer.");
         const order = await app.paymentAdapter?.createOrder({
-          amountPaise: body.amountCredits * 100, // convert credits to paise for Razorpay
+          amountPaise: amountCredits * 100, // 1 credit = INR 1 -> paise for Razorpay
           receipt: `topup_${body.userId}_${Date.now()}`,
           notes: { user_id: body.userId }
         });
-        return sendJson(res, 200, { ok: true, data: order });
+        // Shape the response to exactly what mobile Razorpay Checkout needs:
+        // { orderId, amountCredits, currency, keyId }. keyId is the PUBLIC key
+        // (safe to expose); the secret is never sent to the client.
+        return sendJson(res, 200, {
+          ok: true,
+          data: {
+            orderId: order.id,
+            amountCredits,
+            currency: order.currency ?? "INR",
+            keyId: app.config?.razorpayKeyId ?? ""
+          }
+        });
       }
 
       if (req.method === "POST" && url.pathname === "/wallet/topup/verify") {
         const body = await readJson(req, bodyLimitBytes);
-        const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = body;
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature, userId } = body;
 
         const isValid = verifyRazorpaySignature(
           razorpay_order_id,
@@ -370,7 +406,37 @@ export function createHttpServer(app) {
           throw new DomainError("VERIFICATION_FAILED", "Signature mismatch");
         }
 
-        return sendJson(res, 200, { ok: true, data: { verified: true } });
+        // Signature is authentic -> the payment genuinely happened on Razorpay.
+        // Mint credits NOW. Previously this endpoint verified the signature but
+        // never called topUpWallet, so it returned { verified:true } without
+        // ever crediting the wallet. That is why "money went but no credits
+        // appeared" on the Razorpay path. Amount is taken authoritatively from
+        // Razorpay (re-fetch the payment) rather than trusting the client.
+        let amountCredits = Math.floor(Number(body.amountCredits ?? 0));
+        try {
+          const payment = await app.paymentAdapter?.getPayment?.(razorpay_payment_id);
+          if (payment?.amount) amountCredits = Math.floor(payment.amount / 100);
+        } catch {
+          // Fall back to client-supplied amountCredits if the fetch fails.
+        }
+        invariant(amountCredits > 0, "INVALID_AMOUNT", "Could not determine a positive credit amount for this payment.");
+
+        // paymentId = Razorpay payment id -> idempotent: replaying this verify
+        // (or a later webhook for the same payment) will not double-credit.
+        await app.saga.topUpWallet({
+          userId: userId ?? "user_1",
+          amountCredits,
+          paymentId: razorpay_payment_id,
+          source: "razorpay_upi"
+        });
+
+        const balance = await app.saga
+          .getWalletBalance(userId ?? "user_1")
+          .catch(() => ({ balanceCredits: null }));
+        return sendJson(res, 200, {
+          ok: true,
+          data: { verified: true, amountCredits, balanceCredits: balance.balanceCredits }
+        });
       }
 
 

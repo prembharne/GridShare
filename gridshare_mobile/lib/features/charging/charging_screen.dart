@@ -13,7 +13,8 @@ import '../../core/animations/animated_counter.dart';
 import '../../core/shaders/shader_canvas.dart';
 import '../../data/models/models.dart';
 import '../../data/providers.dart';
-import '../../data/services/api_service.dart';
+import '../../data/services/session_live_client.dart';
+
 import 'charging_ring.dart';
 import 'energy_flow.dart';
 
@@ -28,16 +29,20 @@ class ChargingScreen extends ConsumerStatefulWidget {
 class _ChargingScreenState extends ConsumerState<ChargingScreen> {
   late Session _session;
   StreamSubscription<Telemetry>? _telemetrySub;
-  Telemetry? _latestTelemetry;
+  StreamSubscription<LiveEvent>? _liveSub;
+  SessionLiveClient? _liveClient;
   double _spent = 0;
   double _energy = 0;
   double _current = 0;
   double _voltage = 0;
   double _temp = 0;
+  int _billedMinutes = 0;
   bool _tripped = false;
   bool _settling = false;
   bool _autoStopped = false;
   String? _safetyReason;
+
+  bool get _isPerMinute => _session.isPerMinute;
 
   @override
   void initState() {
@@ -45,23 +50,85 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
     _session = widget.session;
     _spent = _session.spentCredits?.toDouble() ?? 0;
     _energy = _session.energyKwh ?? 0;
-    _startTelemetry();
+    _startLiveStream();
   }
 
-  void _startTelemetry() {
-    final api = ref.read(apiServiceProvider);
-    // In production: connect to WebSocket for real-time telemetry
-    // For now, poll the backend for latest telemetry
-    _pollTelemetry(api);
+  /// Subscribe to the backend WebSocket hub for this session. Real meter ticks,
+  /// telemetry, auto-stop and settlement events drive the UI. If the socket
+  /// can't be reached we silently fall back to the demo simulation so the
+  /// screen still animates during offline/demo runs.
+  void _startLiveStream() {
+    try {
+      _liveClient = SessionLiveClient(sessionId: _session.id);
+      _liveSub = _liveClient!.connect().listen(
+            _onLiveEvent,
+            onError: (_) => _startDemoFallback(),
+          );
+    } catch (_) {
+      _startDemoFallback();
+    }
+    // Belt-and-suspenders: if no event arrives within a few seconds (e.g. the
+    // hub isn't running), kick off the demo simulation so the ring still moves.
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted && _spent == (_session.spentCredits?.toDouble() ?? 0)) {
+        _startDemoFallback();
+      }
+    });
   }
 
-  Future<void> _pollTelemetry(ApiService api) async {
+  void _onLiveEvent(LiveEvent event) {
+    if (!mounted || _settling) return;
+    switch (event.type) {
+      case 'session.meter_tick':
+        setState(() {
+          if (event.amountDueCredits != null) {
+            _spent = event.amountDueCredits!.toDouble();
+          }
+          if (event.billedMinutes != null) {
+            _billedMinutes = event.billedMinutes!;
+          }
+        });
+
+        break;
+      case 'session.telemetry':
+        setState(() {
+          _current =
+              (event.payload['currentAmp'] as num?)?.toDouble() ?? _current;
+          _voltage =
+              (event.payload['voltageV'] as num?)?.toDouble() ?? _voltage;
+          _temp = (event.payload['tempC'] as num?)?.toDouble() ?? _temp;
+          final wh = (event.payload['energyWh'] as num?)?.toDouble();
+          if (wh != null) _energy = wh / 1000;
+        });
+        break;
+      case 'session.auto_stopped':
+      case 'session.settled':
+        _autoStopped = event.type == 'session.auto_stopped';
+        _finish();
+        break;
+      case 'session.safety_tripped':
+        _telemetrySub?.cancel();
+        setState(() {
+          _tripped = true;
+          _safetyReason = event.reason ?? 'Safety trip detected';
+        });
+        break;
+    }
+  }
+
+  bool _demoStarted = false;
+
+  void _startDemoFallback() {
+    if (_demoStarted) return;
+    _demoStarted = true;
+    _pollTelemetry();
+  }
+
+  Future<void> _pollTelemetry() async {
     while (mounted && !_settling && !_tripped) {
       try {
-        // Backend doesn't have GET /telemetry yet; in production use WebSocket
-        // This is a placeholder - real telemetry comes from device → Tuya → TimescaleDB → WS
         await Future.delayed(const Duration(seconds: 2));
-        // Simulate progress for demo
+        // Simulate progress for demo when the live hub is unavailable.
         if (_session.depositCredits > 0) {
           _spent += 0.5;
           _energy += 0.03;
@@ -98,7 +165,9 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Settlement failed: $e'), backgroundColor: AppColors.danger),
+        SnackBar(
+            content: Text('Settlement failed: $e'),
+            backgroundColor: AppColors.danger),
       );
       setState(() => _settling = false);
     }
@@ -115,12 +184,15 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
   @override
   void dispose() {
     _telemetrySub?.cancel();
+    _liveSub?.cancel();
+    _liveClient?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final progress = _session.depositCredits > 0 ? _spent / _session.depositCredits : 0.0;
+    final progress =
+        _session.depositCredits > 0 ? _spent / _session.depositCredits : 0.0;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -130,7 +202,8 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
           // Living backdrop
           Positioned.fill(
             child: ShaderCanvas(
-              spec: ShaderSpec.pulse(color: AppColors.accent, progress: progress.clamp(0.0, 1.0)),
+              spec: ShaderSpec.pulse(
+                  color: AppColors.accent, progress: progress.clamp(0.0, 1.0)),
               fallback: AppColors.surfaceGradient,
             ),
           ),
@@ -159,11 +232,13 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
               children: [
                 // Header
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.lg, vertical: AppSpacing.md),
                   child: Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.arrow_downward_rounded, color: AppColors.textSecondary),
+                        icon: const Icon(Icons.arrow_downward_rounded,
+                            color: AppColors.textSecondary),
                         onPressed: _settling ? null : () => context.pop(),
                       ),
                       const SizedBox(width: AppSpacing.sm),
@@ -172,25 +247,36 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text('Charging', style: AppTextStyles.title),
-                            Text('Live telemetry · Tuya → TimescaleDB', style: AppTextStyles.caption),
+                            Text('Live telemetry · Tuya → TimescaleDB',
+                                style: AppTextStyles.caption),
                           ],
                         ),
                       ),
                       PulseGlow(
-                        color: progress >= 1 ? AppColors.accent : AppColors.accentAlt,
+                        color: progress >= 1
+                            ? AppColors.accent
+                            : AppColors.accentAlt,
                         minBlur: 6,
                         maxBlur: 16,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 6),
                           decoration: BoxDecoration(
-                            color: (progress >= 1 ? AppColors.accent : AppColors.accentAlt)
+                            color: (progress >= 1
+                                    ? AppColors.accent
+                                    : AppColors.accentAlt)
                                 .withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(AppSpacing.rPill),
+                            borderRadius:
+                                BorderRadius.circular(AppSpacing.rPill),
                           ),
                           child: Text(
-                            progress >= 1 ? 'Complete' : '${(progress * 100).toInt()}%',
+                            progress >= 1
+                                ? 'Complete'
+                                : '${(progress * 100).toInt()}%',
                             style: AppTextStyles.label.copyWith(
-                              color: progress >= 1 ? AppColors.accent : AppColors.accentAlt,
+                              color: progress >= 1
+                                  ? AppColors.accent
+                                  : AppColors.accentAlt,
                             ),
                           ),
                         ),
@@ -222,20 +308,34 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
                   suffix: ' credits',
                   style: AppTextStyles.counter,
                 ),
-                Text('of ${_session.depositCredits} credits deposited', style: AppTextStyles.caption),
+                Text(
+                    _isPerMinute
+                        ? '$_billedMinutes / ${_session.selectedDurationMinutes} min · ${_session.ratePerMinuteCredits}/min'
+                        : 'of ${_session.depositCredits} credits deposited',
+                    style: AppTextStyles.caption),
                 const SizedBox(height: AppSpacing.lg),
+
                 // Readouts
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
-                      _Readout(label: 'CURRENT', value: '${_current.toStringAsFixed(1)} A', color: AppColors.accent),
-                      _Readout(label: 'VOLTAGE', value: '${_voltage.toStringAsFixed(0)} V', color: AppColors.accentAlt),
+                      _Readout(
+                          label: 'CURRENT',
+                          value: '${_current.toStringAsFixed(1)} A',
+                          color: AppColors.accent),
+                      _Readout(
+                          label: 'ENERGY',
+                          value: '${_energy.toStringAsFixed(2)} kWh',
+                          color: AppColors.accentAlt),
                       _Readout(
                         label: 'TEMP',
                         value: '${_temp.toStringAsFixed(0)}°C',
-                        color: _temp > 45 ? AppColors.danger : AppColors.textSecondary,
+                        color: _temp > 45
+                            ? AppColors.danger
+                            : AppColors.textSecondary,
                       ),
                     ],
                   ),
@@ -243,7 +343,8 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
                 const SizedBox(height: AppSpacing.xl),
                 // Stop button
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
                   child: _tripped
                       ? AppButton(
                           label: 'Acknowledge & close',
@@ -260,7 +361,8 @@ class _ChargingScreenState extends ConsumerState<ChargingScreen> {
                 TextButton(
                   onPressed: _tripped || _settling ? null : _simulateTrip,
                   child: Text('demo · simulate safety trip',
-                      style: AppTextStyles.caption.copyWith(color: AppColors.textMuted)),
+                      style: AppTextStyles.caption
+                          .copyWith(color: AppColors.textMuted)),
                 ),
                 const SizedBox(height: AppSpacing.md),
               ],
@@ -276,7 +378,8 @@ class _Readout extends StatelessWidget {
   final String label;
   final String value;
   final Color color;
-  const _Readout({required this.label, required this.value, required this.color});
+  const _Readout(
+      {required this.label, required this.value, required this.color});
 
   @override
   Widget build(BuildContext context) {

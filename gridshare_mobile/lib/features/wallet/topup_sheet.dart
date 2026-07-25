@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:razorpay_flutter/razorpay_flutter.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../core/theme/app_colors.dart';
@@ -41,6 +43,12 @@ class _TopUpSheetState extends ConsumerState<TopUpSheet>
   int _amount = 100;
   bool _loading = false;
 
+  // Razorpay Checkout (UPI/cards/netbanking). Created in initState, disposed
+  // in dispose. The pending order is held while the Checkout sheet is open so
+  // the success handler can verify it against the backend.
+  Razorpay? _razorpay;
+  TopUpOrder? _pendingOrder;
+
   // UPI
   final List<int> _presets = [50, 100, 200, 500, 1000];
 
@@ -63,12 +71,17 @@ class _TopUpSheetState extends ConsumerState<TopUpSheet>
       duration: const Duration(milliseconds: 280),
     );
     _fetchFxRate();
+    _razorpay = Razorpay()
+      ..on(Razorpay.EVENT_PAYMENT_SUCCESS, _onRazorpaySuccess)
+      ..on(Razorpay.EVENT_PAYMENT_ERROR, _onRazorpayError)
+      ..on(Razorpay.EVENT_EXTERNAL_WALLET, _onRazorpayExternalWallet);
   }
 
   @override
   void dispose() {
     _animCtrl.dispose();
     _pollTimer?.cancel();
+    _razorpay?.clear();
     super.dispose();
   }
 
@@ -113,60 +126,108 @@ class _TopUpSheetState extends ConsumerState<TopUpSheet>
     }
   }
 
-  // ── Instamojo UPI top-up ──────────────────────────────────────────────────
+  // ── Razorpay UPI top-up ───────────────────────────────────────────────────
+  // 1. Ask the backend to create a Razorpay Order (bound to this userId).
+  // 2. Open Razorpay Checkout with that order + the PUBLIC key from the server.
+  // 3. On success, the SDK returns order/payment/signature; we send them to the
+  //    backend which re-verifies the signature, re-fetches the amount, and mints
+  //    credits. The client is never trusted to self-report a successful payment.
   Future<void> _topUpUpi() async {
     setState(() => _loading = true);
     try {
       final api = ref.read(apiServiceProvider);
-      final order = await api.createInstamojoOrder(
+      final order = await api.createTopUpOrder(
         amountCredits: _amount,
         userId: widget.userId,
       );
+      _pendingOrder = order;
+
+      if (order.keyId.isEmpty) {
+        throw Exception('Payment gateway is not configured (missing key).');
+      }
+
+      final options = {
+        'key': order.keyId,
+        'order_id': order.orderId,
+        'amount': order.amountCredits * 100, // paise
+        'currency': order.currency,
+        'name': 'GridShare',
+        'description': '${order.amountCredits} credits top-up',
+        'prefill': <String, dynamic>{},
+        'theme': {'color': '#00F5D4'},
+      };
 
       if (!mounted) return;
       setState(() => _loading = false);
-
-      // Open Instamojo hosted payment page in a full-screen WebView screen
-      final result = await Navigator.push<_InstamojoResult>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => _InstamojoWebViewScreen(paymentUrl: order.paymentUrl),
-        ),
-      );
-
-      if (result != null && result.paymentId != null) {
-        setState(() => _loading = true);
-        // Verify payment on backend & mint credits
-        await api.verifyInstamojoPayment(
-          paymentRequestId: result.requestId ?? order.requestId,
-          paymentId: result.paymentId!,
-          userId: widget.userId,
-          amountCredits: _amount,
-        );
-
-        final balance = await api.getBalance(userId: widget.userId);
-        if (!mounted) return;
-        ref.read(currentUserProvider.notifier).state =
-            ref.read(currentUserProvider)!.copyWith(
-                  walletBalanceCredits: balance.balanceCredits,
-                );
-        Navigator.pop(context, true);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              '₹$_amount credits added via Instamojo UPI! Balance: ${balance.balanceCredits}'),
-          backgroundColor: AppColors.accent,
-        ));
-      }
+      _razorpay?.open(options);
     } catch (e) {
       if (!mounted) return;
+      setState(() => _loading = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content: Text('Instamojo UPI error: $e'),
-            backgroundColor: AppColors.danger),
+          content: Text('Could not start UPI payment: $e'),
+          backgroundColor: AppColors.danger,
+        ),
       );
+    }
+  }
+
+  Future<void> _onRazorpaySuccess(PaymentSuccessResponse response) async {
+    final order = _pendingOrder;
+    if (order == null) return;
+    setState(() => _loading = true);
+    try {
+      final api = ref.read(apiServiceProvider);
+      final newBalance = await api.verifyTopUp(
+        orderId: response.orderId ?? order.orderId,
+        paymentId: response.paymentId ?? '',
+        signature: response.signature ?? '',
+        userId: widget.userId,
+        amountCredits: order.amountCredits,
+      );
+      if (!mounted) return;
+      final current = ref.read(currentUserProvider);
+      if (current != null) {
+        ref.read(currentUserProvider.notifier).state =
+            current.copyWith(walletBalanceCredits: newBalance);
+      }
+      Navigator.pop(context, true);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            '₹${order.amountCredits} added via UPI! Balance: $newBalance credits'),
+        backgroundColor: AppColors.success,
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            'Payment succeeded but crediting failed: $e. Your balance will update shortly.'),
+        backgroundColor: AppColors.warning,
+        duration: const Duration(seconds: 5),
+      ));
     } finally {
       if (mounted) setState(() => _loading = false);
+      _pendingOrder = null;
     }
+  }
+
+  void _onRazorpayError(PaymentFailureResponse response) {
+    _pendingOrder = null;
+    if (!mounted) return;
+    setState(() => _loading = false);
+    final msg = response.message ?? 'Payment was cancelled or failed.';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('UPI payment failed: $msg'),
+      backgroundColor: AppColors.danger,
+    ));
+  }
+
+  void _onRazorpayExternalWallet(ExternalWalletResponse response) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Selected wallet: ${response.walletName ?? ''}'),
+      backgroundColor: AppColors.surfaceHigh,
+    ));
   }
 
   // ── USDC top-up ─────────────────────────────────────────────────────────
@@ -174,14 +235,28 @@ class _TopUpSheetState extends ConsumerState<TopUpSheet>
     setState(() => _loading = true);
     _pollTimer?.cancel();
     _intentStatus = null;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final api = ref.read(apiServiceProvider);
+
+    // Warm the (possibly sleeping) free-tier backend and tell the user, so a
+    // 20–50s cold start looks like "connecting" instead of a silent freeze.
+    if (!api.isWarm) {
+      messenger.showSnackBar(const SnackBar(
+        content: Text('Connecting to GridShare server… (this can take up to '
+            'a minute if it was idle)'),
+        duration: Duration(seconds: 8),
+      ));
+    }
+
     try {
-      final api = ref.read(apiServiceProvider);
       final intent = await api.createUsdcIntent(
         userId: widget.userId,
         amountCredits: _amount,
         assetCode: 'XLM',
       );
       if (!mounted) return;
+      messenger.hideCurrentSnackBar();
       setState(() {
         _intent = intent;
         _usdInrRate = intent.lockedRate;
@@ -189,14 +264,34 @@ class _TopUpSheetState extends ConsumerState<TopUpSheet>
       _startPolling(intent.memo);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
         SnackBar(
-            content: Text('Failed to create USDC intent: $e'),
-            backgroundColor: AppColors.danger),
+          content: Text(_friendlyError(
+              e, 'Could not start the XLM top-up. Please try again.')),
+          backgroundColor: AppColors.danger,
+        ),
       );
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  /// Turns raw exceptions (TimeoutException, SocketException) into a clear,
+  /// user-facing sentence. Falls back to [fallback] for unknown cases.
+  String _friendlyError(Object e, String fallback) {
+    final s = e.toString().toLowerCase();
+    if (s.contains('timeout') || s.contains('future not completed')) {
+      return 'The server took too long to respond (it may have been asleep). '
+          'Please tap the button again — it should be awake now.';
+    }
+    if (s.contains('socket') ||
+        s.contains('failed host lookup') ||
+        s.contains('connection')) {
+      return 'No internet connection to the GridShare server. '
+          'Check your network and try again.';
+    }
+    return fallback;
   }
 
   void _startPolling(String memo) {
@@ -266,10 +361,9 @@ class _TopUpSheetState extends ConsumerState<TopUpSheet>
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(
-                  status.status == 'pending'
-                      ? 'No matching payment found yet on Stellar. Please try again after sending.'
-                      : 'Status: ${status.status}'),
+              content: Text(status.status == 'pending'
+                  ? 'No matching payment found yet on Stellar. Please try again after sending.'
+                  : 'Status: ${status.status}'),
               backgroundColor: AppColors.warning,
             ),
           );
@@ -1256,16 +1350,28 @@ class _UsdcDepositView extends StatelessWidget {
         ),
         const SizedBox(height: AppSpacing.xl),
 
-        if (isPending)
+        if (isPending) ...[
           Padding(
             padding: const EdgeInsets.only(bottom: AppSpacing.md),
             child: AppButton(
-              label: isVerifying ? 'Verifying on Stellar...' : 'I Have Paid / Check Status',
+              label: 'Open in Stellar Wallet',
+              width: double.infinity,
+              icon: Icons.open_in_new_rounded,
+              onPressed: () => _openInWallet(context),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.md),
+            child: AppButton(
+              label: isVerifying
+                  ? 'Verifying on Stellar...'
+                  : 'I Have Paid / Check Status',
               width: double.infinity,
               icon: isVerifying ? null : Icons.sync_rounded,
               onPressed: isVerifying ? null : onVerify,
             ),
           ),
+        ],
 
         if (isExpired || isConfirmed)
           AppButton(
@@ -1284,104 +1390,35 @@ class _UsdcDepositView extends StatelessWidget {
     );
   }
 
-  void _showWalletConnectModal(BuildContext context, UsdcIntent intent) {
-    const projectId = '3f139c3090412322bc70d9d894dadb38';
-    final wcUri =
-        'wc:gridshare-usdc-pay-${intent.memo}?projectId=$projectId&amount=${intent.expectedUsdc}';
+  /// Launches the intent's SEP-0007 `web+stellar:pay` URI so the OS can hand it
+  /// to any installed Stellar wallet (LOBSTR, Freighter mobile, etc.). If no
+  /// wallet handles it, we fall back to copying the address + memo so the user
+  /// can paste them manually. This is the "redirect to wallet" flow.
+  Future<void> _openInWallet(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final uriStr =
+        intent.qrUri.isNotEmpty ? intent.qrUri : intent.depositAddress;
 
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.all(24),
-        decoration: const BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                      color: const Color(0xFF3B99FC).withOpacity(0.15),
-                      shape: BoxShape.circle),
-                  child: const Icon(Icons.account_balance_wallet,
-                      color: Color(0xFF3B99FC), size: 24),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('WalletConnectPay SDK',
-                          style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.textPrimary)),
-                      Text('Project ID: 3f139c309...b38',
-                          style: TextStyle(
-                              fontSize: 11, color: AppColors.textSecondary)),
-                    ],
-                  ),
-                ),
-                IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.pop(ctx)),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.surfaceHigh,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                children: [
-                  Text('Amount: ${intent.expectedUsdc.toStringAsFixed(4)} USDC',
-                      style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.textPrimary)),
-                  const SizedBox(height: 4),
-                  Text('Memo: ${intent.memo}',
-                      style: const TextStyle(
-                          fontSize: 12,
-                          fontFamily: 'monospace',
-                          color: AppColors.accent)),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            ElevatedButton.icon(
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: wcUri));
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text(
-                          '✓ WalletConnect URI copied! Connect with Trust, LOBSTR or Web3 wallet.'),
-                      backgroundColor: Color(0xFF3B99FC)),
-                );
-              },
-              icon:
-                  const Icon(Icons.copy_rounded, color: Colors.white, size: 18),
-              label: const Text('Copy WalletConnect Pay URI',
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold, color: Colors.white)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF3B99FC),
-                minimumSize: const Size(double.infinity, 50),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(16)),
-              ),
-            ),
-            const SizedBox(height: 12),
-          ],
-        ),
+    try {
+      final uri = Uri.parse(uriStr);
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (launched) return;
+    } catch (_) {
+      // fall through to manual fallback
+    }
+
+    // No compatible wallet app — copy the essentials so the user isn't stuck.
+    await Clipboard.setData(ClipboardData(
+      text: 'Address: ${intent.depositAddress}\nMemo: ${intent.memo}',
+    ));
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+            'No Stellar wallet app found. Address + memo copied — paste them '
+            'into LOBSTR/Freighter to send.'),
+        backgroundColor: AppColors.warning,
+        duration: Duration(seconds: 5),
       ),
     );
   }

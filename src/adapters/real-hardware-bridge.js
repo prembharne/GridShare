@@ -2,18 +2,46 @@ import axios from "axios";
 import { DomainError } from "../core/errors.js";
 
 export class RealHardwareBridge {
-  constructor({ clientId, clientSecret, endpoint, deviceId, webhookSecret, eventBus } = {}) {
+  constructor({ clientId, clientSecret, endpoint, deviceId, webhookSecret, eventBus, resolveDeviceId } = {}) {
     this.clientId = clientId;
     this.clientSecret = clientSecret;
     this.endpoint = endpoint || "https://openapi.tuyacn.com";
     this.deviceId = deviceId;
     this.webhookSecret = webhookSecret;
     this.eventBus = eventBus;
+    // Optional per-outlet routing: maps an outletId to its Tuya device id.
+    // Falls back to the single configured deviceId when unset/unresolved so
+    // single-plug deployments keep working unchanged.
+    this.resolveDeviceId = resolveDeviceId;
     this.accessToken = null;
     this.tokenExpiry = 0;
     this.deviceStates = new Map();
     this.commands = [];
   }
+
+  /**
+   * Resolve the Tuya device id for an outlet. Prefers the injected resolver
+   * (per-outlet routing), then the outlet-scoped fallback, then the globally
+   * configured deviceId. Throws when nothing can be resolved.
+   */
+  resolveDevice(outletId) {
+    let deviceId;
+    if (typeof this.resolveDeviceId === "function" && outletId != null) {
+      try {
+        deviceId = this.resolveDeviceId(outletId);
+      } catch {
+        deviceId = undefined;
+      }
+    }
+    deviceId = deviceId || this.deviceId;
+    if (!deviceId) {
+      throw new DomainError("HARDWARE_DEVICE_UNRESOLVED", "No Tuya device id could be resolved for outlet.", {
+        outletId
+      });
+    }
+    return deviceId;
+  }
+
 
   async getAccessToken() {
     const now = Date.now();
@@ -33,16 +61,18 @@ export class RealHardwareBridge {
 
   async setSwitch({ outletId, desiredState, reason, sessionId }) {
     const token = await this.getAccessToken();
+    const deviceId = this.resolveDevice(outletId);
     const commands = [{
       code: "switch_1",
       value: desiredState
     }];
 
     const response = await axios.post(
-      `${this.endpoint}/v1.0/devices/${this.deviceId}/commands`,
+      `${this.endpoint}/v1.0/devices/${deviceId}/commands`,
       { commands },
       { headers: { Authorization: `Bearer ${token}` } }
     );
+
 
     if (!response.data.success) {
       throw new DomainError("HARDWARE_COMMAND_FAILED", "Tuya command failed.", {
@@ -69,15 +99,17 @@ export class RealHardwareBridge {
     return this.clone(command);
   }
 
-  async getDeviceStatus() {
+  async getDeviceStatus(outletId) {
     const token = await this.getAccessToken();
+    const deviceId = this.resolveDevice(outletId);
     const response = await axios.get(
-      `${this.endpoint}/v1.0/devices/${this.deviceId}/status`,
+      `${this.endpoint}/v1.0/devices/${deviceId}/status`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
     if (!response.data.success) {
       throw new DomainError("HARDWARE_STATUS_FAILED", "Failed to get device status.", {
+        outletId,
         response: response.data
       });
     }
@@ -88,6 +120,30 @@ export class RealHardwareBridge {
     }
     return status;
   }
+
+  /**
+   * Live, UI-friendly snapshot for a single outlet. Normalizes the raw Tuya
+   * status codes (cur_power in deciwatts, cur_current in mA, cur_voltage in
+   * decivolts, add_ele in Wh) into a stable shape consumed by /outlets/:id/live
+   * and the host dashboard. Falls back to the last-known switch state on error.
+   */
+  async getLiveStatus(outletId) {
+    const status = await this.getDeviceStatus(outletId);
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    return {
+      outletId,
+      online: true,
+      switchOn: Boolean(status.switch_1 ?? status.switch ?? false),
+      powerW: num(status.cur_power) / 10,
+      currentA: num(status.cur_current) / 1000,
+      voltageV: num(status.cur_voltage) / 10,
+      energyWh: num(status.add_ele),
+      tempC: num(status.temp_current) / 10,
+      sampledAt: new Date().toISOString(),
+      raw: status
+    };
+  }
+
 
   getSwitchState(outletId) {
     return this.deviceStates.get(outletId) ?? false;

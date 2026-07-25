@@ -58,6 +58,28 @@ export class MockHardwareBridge {
     return this.deviceStates.get(outletId) ?? false;
   }
 
+  /**
+   * Synthetic live snapshot for dev/mock mode so /outlets/:id/live and the host
+   * dashboard render without a real device. Mirrors the RealHardwareBridge
+   * shape: powers a plausible ~3.3 kW draw when the switch is on, zero when off.
+   */
+  async getLiveStatus(outletId) {
+    const switchOn = this.getSwitchState(outletId);
+    return {
+      outletId,
+      online: true,
+      switchOn,
+      powerW: switchOn ? 3300 : 0,
+      currentA: switchOn ? 14.3 : 0,
+      voltageV: switchOn ? 230 : 0,
+      energyWh: 0,
+      tempC: 32,
+      sampledAt: new Date().toISOString(),
+      mock: true
+    };
+  }
+
+
   getCommands({ outletId, sessionId } = {}) {
     return clone(
       this.commands.filter((command) => {

@@ -1,15 +1,24 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import '../models/models.dart';
 
+/// Canonical production backend. Used as the default and as the guaranteed
+/// fallback host so a physical phone never ends up pointing at `localhost`.
+const String kProductionBaseUrl = 'https://gridshare-backend.onrender.com';
+
 String get _defaultBaseUrl {
   const envUrl = String.fromEnvironment('API_BASE_URL');
   if (envUrl.isNotEmpty) return envUrl;
-  return 'https://gridshare-backend.onrender.com';
+  return kProductionBaseUrl;
 }
+
+/// Free-tier hosts (Render) sleep after inactivity and can take 20–50s to wake.
+/// These generous timeouts + a warm-up ping stop the app from giving up early
+/// with a `TimeoutException` while the server is still spinning up.
+const Duration _kColdStartTimeout = Duration(seconds: 75);
+const Duration _kWarmTimeout = Duration(seconds: 30);
 
 /// Centralised HTTP client with auth, idempotency keys, and error mapping.
 class ApiService {
@@ -54,6 +63,102 @@ class ApiService {
         message: msg,
         statusCode: res.statusCode,
         details: body['error']?['details']);
+  }
+
+  // ==================== COLD-START / WARM-UP ====================
+
+  bool _isWarm = false;
+
+  /// Whether the backend has already responded successfully this session.
+  /// UI can use this to decide whether to show a "connecting…" hint.
+  bool get isWarm => _isWarm;
+
+  /// Pings the backend health endpoint to wake a sleeping free-tier host
+
+  /// (Render spins down after ~15 min idle and takes 20–50s to boot).
+  /// Safe to call repeatedly; it becomes a cheap no-op once warm.
+  /// Returns true if the server responded 2xx within [timeout].
+  Future<bool> warmUp({Duration timeout = _kColdStartTimeout}) async {
+    if (_isWarm) return true;
+    for (final path in const ['/health', '/']) {
+      try {
+        final res = await _client
+            .get(Uri.parse('$_baseUrl$path'), headers: _headers())
+            .timeout(timeout);
+        if (res.statusCode >= 200 && res.statusCode < 500) {
+          _isWarm = true;
+          return true;
+        }
+      } catch (_) {
+        // try next path / fall through
+      }
+    }
+    return false;
+  }
+
+  /// Sends a POST that tolerates cold starts: it warms the server first, then
+  /// tries the primary URL with a long timeout, and finally the canonical
+  /// production host. Never falls back to `localhost` (meaningless on a phone).
+  Future<dynamic> _postResilient(
+    String path, {
+    required Map<String, dynamic> body,
+    String? idempotencyKey,
+    Duration timeout = _kColdStartTimeout,
+  }) async {
+    await warmUp(timeout: timeout);
+    final urls = <String>{
+      '$_baseUrl$path',
+      '$kProductionBaseUrl$path',
+    }.toList();
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .post(
+              Uri.parse(urlStr),
+              headers: _headers(idempotencyKey: idempotencyKey),
+              body: jsonEncode(body),
+            )
+            .timeout(timeout);
+        _isWarm = true;
+        return _check(res);
+      } on ApiException {
+        rethrow; // a real backend error — don't mask it by retrying blindly
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ??
+        Exception('Could not reach the GridShare server. Please try again.');
+  }
+
+  /// GET variant of [_postResilient].
+  Future<dynamic> _getResilient(
+    String path, {
+    Duration timeout = _kWarmTimeout,
+  }) async {
+    final urls = <String>{
+      '$_baseUrl$path',
+      '$kProductionBaseUrl$path',
+    }.toList();
+
+    Object? lastError;
+    for (final urlStr in urls) {
+      try {
+        final res = await _client
+            .get(Uri.parse(urlStr), headers: _headers())
+            .timeout(timeout);
+        _isWarm = true;
+        return _check(res);
+      } on ApiException {
+        rethrow;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError ??
+        Exception('Could not reach the GridShare server. Please try again.');
   }
 
   // ============================ AUTH ============================
@@ -178,6 +283,39 @@ class ApiService {
     return TopUpOrder.fromJson(_check(res));
   }
 
+  /// POST /wallet/topup/verify — Verify a Razorpay Checkout payment and mint
+  /// credits. The backend re-checks the signature AND re-fetches the payment
+  /// amount from Razorpay, so the client cannot forge or inflate a top-up.
+  /// Returns the new wallet balance (credits).
+  Future<int> verifyTopUp({
+    required String orderId,
+    required String paymentId,
+    required String signature,
+    required String userId,
+    required int amountCredits,
+  }) async {
+    final res = await _client.post(
+      Uri.parse('$_baseUrl/wallet/topup/verify'),
+      headers: _headers(),
+      body: jsonEncode({
+        'razorpay_order_id': orderId,
+        'razorpay_payment_id': paymentId,
+        'razorpay_signature': signature,
+        'userId': userId,
+        'amountCredits': amountCredits,
+      }),
+    );
+    final body = _check(res);
+    final data = (body['data'] as Map<String, dynamic>?) ?? const {};
+    if (data['verified'] != true) {
+      throw ApiException(
+          code: 'VERIFICATION_FAILED',
+          message: 'Payment could not be verified.',
+          statusCode: res.statusCode);
+    }
+    return (data['balanceCredits'] as num?)?.toInt() ?? 0;
+  }
+
   /// GET /wallet/:userId/balance — Current credit balance from contract.
   Future<WalletBalance> getBalance({required String userId}) async {
     final res = await _client.get(
@@ -186,7 +324,8 @@ class ApiService {
     );
     final body = _check(res);
     // Backend wraps response in { ok: true, data: { userId, balanceCredits } }
-    final data = (body['data'] as Map<String, dynamic>?) ?? body as Map<String, dynamic>;
+    final data =
+        (body['data'] as Map<String, dynamic>?) ?? body as Map<String, dynamic>;
     return WalletBalance.fromJson(data);
   }
 
@@ -207,86 +346,30 @@ class ApiService {
     required int amountCredits,
     String assetCode = 'XLM',
   }) async {
-    final urls = [
-      '$_baseUrl/wallet/topup/usdc',
-      if (!_baseUrl.contains('localhost')) 'http://localhost:8080/wallet/topup/usdc',
-      if (!_baseUrl.contains('10.0.2.2')) 'http://10.0.2.2:8080/wallet/topup/usdc',
-    ];
-
-    Object? lastError;
-    for (final urlStr in urls) {
-      try {
-        final res = await _client
-            .post(
-              Uri.parse(urlStr),
-              headers: _headers(),
-              body: jsonEncode({
-                'userId': userId,
-                'amountCredits': amountCredits,
-                'assetCode': assetCode,
-              }),
-            )
-            .timeout(const Duration(seconds: 25));
-        final data = _check(res);
-        return UsdcIntent.fromJson(data['data'] as Map<String, dynamic>);
-      } catch (e) {
-        lastError = e;
-      }
-    }
-    throw lastError ?? Exception('Failed to connect to backend server.');
+    final data = await _postResilient('/wallet/topup/usdc', body: {
+      'userId': userId,
+      'amountCredits': amountCredits,
+      'assetCode': assetCode,
+    });
+    return UsdcIntent.fromJson(data['data'] as Map<String, dynamic>);
   }
 
   /// GET /wallet/topup/usdc/:memo — Poll intent status (pending → confirmed).
   Future<UsdcIntentStatus> pollUsdcIntent({required String memo}) async {
-    final urls = [
-      '$_baseUrl/wallet/topup/usdc/$memo',
-      if (!_baseUrl.contains('localhost')) 'http://localhost:8080/wallet/topup/usdc/$memo',
-      if (!_baseUrl.contains('10.0.2.2')) 'http://10.0.2.2:8080/wallet/topup/usdc/$memo',
-    ];
-
-    Object? lastError;
-    for (final urlStr in urls) {
-      try {
-        final res = await _client
-            .get(
-              Uri.parse(urlStr),
-              headers: _headers(),
-            )
-            .timeout(const Duration(seconds: 15));
-        final data = _check(res);
-        return UsdcIntentStatus.fromJson(data['data'] as Map<String, dynamic>);
-      } catch (e) {
-        lastError = e;
-      }
-    }
-    throw lastError ?? Exception('Failed to poll USDC intent status.');
+    final data = await _getResilient('/wallet/topup/usdc/$memo',
+        timeout: const Duration(seconds: 15));
+    return UsdcIntentStatus.fromJson(data['data'] as Map<String, dynamic>);
   }
 
   /// POST /wallet/topup/usdc/:memo/verify — Actively verify & confirm USDC payment.
-  /// NOTE: Horizon testnet can take 8-15s to respond, so timeout is 30s.
+  /// NOTE: Horizon testnet can take 8-15s to respond, so we allow a long timeout.
   Future<UsdcIntentStatus> verifyUsdcIntent({required String memo}) async {
-    final urls = [
-      '$_baseUrl/wallet/topup/usdc/$memo/verify',
-      if (!_baseUrl.contains('localhost')) 'http://localhost:8080/wallet/topup/usdc/$memo/verify',
-      if (!_baseUrl.contains('10.0.2.2')) 'http://10.0.2.2:8080/wallet/topup/usdc/$memo/verify',
-    ];
-
-    Object? lastError;
-    for (final urlStr in urls) {
-      try {
-        final res = await _client
-            .post(
-              Uri.parse(urlStr),
-              headers: _headers(),
-            )
-            .timeout(const Duration(seconds: 30));
-        final data = _check(res);
-        return UsdcIntentStatus.fromJson(data['data'] as Map<String, dynamic>);
-      } catch (e) {
-        lastError = e;
-      }
-    }
-    throw lastError ?? Exception('Failed to verify USDC payment.');
+    final data = await _postResilient(
+      '/wallet/topup/usdc/$memo/verify',
+      body: const {},
+      timeout: const Duration(seconds: 45),
+    );
+    return UsdcIntentStatus.fromJson(data['data'] as Map<String, dynamic>);
   }
 
   /// GET /wallet/:userId/source-ledger — UPI vs USDC earnings buckets.
@@ -308,6 +391,8 @@ class ApiService {
     required String hostId,
     required String outletId,
     required int depositCredits,
+    int? ratePerMinuteCredits,
+    int? selectedDurationMinutes,
     String? idempotencyKey,
   }) async {
     final res = await _client.post(
@@ -318,6 +403,11 @@ class ApiService {
         'hostId': hostId,
         'outletId': outletId,
         'depositCredits': depositCredits,
+        // Per-minute billing (omitted → backend falls back to energy billing).
+        if (ratePerMinuteCredits != null)
+          'ratePerMinuteCredits': ratePerMinuteCredits,
+        if (selectedDurationMinutes != null)
+          'selectedDurationMinutes': selectedDurationMinutes,
       }),
     );
     final data = _check(res);
@@ -421,38 +511,16 @@ class ApiService {
     double? lat,
     double? lng,
   }) async {
-    final urls = [
-      '$_baseUrl/outlets',
-      if (!_baseUrl.contains('localhost:3000')) 'http://localhost:3000/outlets',
-      if (!_baseUrl.contains('10.0.2.2:3000')) 'http://10.0.2.2:3000/outlets',
-      if (!_baseUrl.contains('localhost:8080')) 'http://localhost:8080/outlets',
-    ];
-
-    Object? lastError;
-    for (final urlStr in urls) {
-      try {
-        final res = await _client
-            .post(
-              Uri.parse(urlStr),
-              headers: _headers(),
-              body: jsonEncode({
-                'name': name,
-                'providerDeviceId': providerDeviceId,
-                'ratePerKwh': ratePerKwh,
-                'address': address ?? 'Host Registered Station',
-                'connectorType': connectorType ?? '16A Socket',
-                'lat': lat ?? 19.0760,
-                'lng': lng ?? 72.8777,
-              }),
-            )
-            .timeout(const Duration(seconds: 25));
-        final data = _check(res);
-        return Outlet.fromJson(data['data']['outlet'] as Map<String, dynamic>);
-      } catch (e) {
-        lastError = e;
-      }
-    }
-    throw lastError ?? Exception('Failed to register smart plug outlet.');
+    final data = await _postResilient('/outlets', body: {
+      'name': name,
+      'providerDeviceId': providerDeviceId,
+      'ratePerKwh': ratePerKwh,
+      'address': address ?? 'Host Registered Station',
+      'connectorType': connectorType ?? '16A Socket',
+      'lat': lat ?? 19.0760,
+      'lng': lng ?? 72.8777,
+    });
+    return Outlet.fromJson(data['data']['outlet'] as Map<String, dynamic>);
   }
 
   // ============================ ADMIN / HOST ============================

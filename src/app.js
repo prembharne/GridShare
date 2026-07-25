@@ -12,6 +12,8 @@ import { RetryPolicy } from "./core/retry-policy.js";
 import { InMemoryStore } from "./adapters/in-memory-store.js";
 import { SafetyTripRuleEngine } from "./domain/safety-trip-rule-engine.js";
 import { SessionSaga } from "./domain/session-saga.js";
+import { SessionMeter } from "./domain/session-meter.js";
+
 import { JudgeDemoService } from "./demo/judge-demo.js";
 import { RealPaymentAdapter } from "./adapters/real-payment-adapter.js";
 import { InMemoryUserRepository } from "./adapters/in-memory-user-repository.js";
@@ -21,6 +23,8 @@ import { FxRateAdapter } from "./adapters/fx-rate-adapter.js";
 import { StellarUsdcAdapter } from "./adapters/stellar-usdc-adapter.js";
 import { InstamojoAdapter } from "./adapters/instamojo-adapter.js";
 import { UserWalletManager } from "./adapters/user-wallet-manager.js";
+import { findOutlet } from "./domain/outlet-catalog.js";
+
 
 // Lazy require so the heavy real-adapter SDKs (stellar-sdk, axios, razorpay,
 // prisma) are only loaded when GRIDSHARE_USE_REAL_ADAPTERS=true. This keeps
@@ -136,8 +140,13 @@ export function createApp({ env = process.env, config = loadConfig(env) } = {}) 
       endpoint: config.tuyaEndpoint,
       deviceId: config.tuyaDeviceId,
       webhookSecret: config.tuyaWebhookSecret,
+      // Per-outlet routing: map outletId -> its Tuya providerDeviceId from the
+      // catalog so multiple plugs can be controlled independently. Unresolved
+      // outlets fall back to the single configured tuyaDeviceId.
+      resolveDeviceId: (outletId) => findOutlet(outletId)?.providerDeviceId,
       eventBus
     });
+
 
     paymentAdapter = new RealPaymentAdapter({
       keyId: config.razorpayKeyId,
@@ -243,7 +252,18 @@ export function createApp({ env = process.env, config = loadConfig(env) } = {}) 
     config
   });
 
+  // Per-minute billing clock. Ticks active per-minute sessions on an interval,
+  // auto-stopping them when the selected duration elapses or the accrued charge
+  // reaches the locked deposit. Started explicitly via app.startSessionMeter().
+  const sessionMeter = new SessionMeter({
+    saga,
+    store,
+    eventBus,
+    intervalMs: config.meterIntervalMs
+  });
+
   const app = {
+
     config,
     eventBus,
     store,
@@ -258,8 +278,12 @@ export function createApp({ env = process.env, config = loadConfig(env) } = {}) 
     retryPolicy,
     safetyEngine,
     saga,
+    sessionMeter,
     demo
   };
+
+  app.startSessionMeter = () => sessionMeter.start();
+
 
   // Start the Horizon payment watcher: each confirmed USDC deposit whose memo
   // matches a pending intent is minted as credits via the SAME topUpWallet

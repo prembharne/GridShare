@@ -19,29 +19,56 @@ class ScanScreen extends StatefulWidget {
   State<ScanScreen> createState() => _ScanScreenState();
 }
 
-class _ScanScreenState extends State<ScanScreen> {
+class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
   late final MobileScannerController _cameraController;
   bool _scanned = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _cameraController = MobileScannerController(
       detectionSpeed: DetectionSpeed.normal,
       facing: CameraFacing.back,
       torchEnabled: false,
     );
+    // mobile_scanner 6.x does NOT auto-start the camera. Without an explicit
+    // start() the preview stays black and errorBuilder renders. Start after the
+    // first frame so the platform view is attached and the OS permission prompt
+    // fires reliably (important on MIUI / Redmi).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _cameraController.start();
+    });
+  }
+
+  // Release/re-acquire the camera with the app lifecycle so returning to the
+  // screen doesn't leave a frozen/black preview.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _cameraController.start();
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _cameraController.stop();
+        break;
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cameraController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.outlet != null && ModalRoute.of(context)?.settings.name == null) {
+    if (widget.outlet != null &&
+        ModalRoute.of(context)?.settings.name == null) {
       final o = widget.outlet!;
       Future.microtask(() {
         if (context.mounted) context.pushReplacement('/pay', extra: o);
@@ -56,14 +83,17 @@ class _ScanScreenState extends State<ScanScreen> {
           icon: const Icon(Icons.close, color: AppColors.textSecondary),
           onPressed: () => context.pop(),
         ),
-        title: const GradientText('Scan to charge', style: AppTextStyles.title, shimmer: false),
+        title: const GradientText('Scan to charge',
+            style: AppTextStyles.title, shimmer: false),
         actions: [
           ValueListenableBuilder(
             valueListenable: _cameraController,
             builder: (context, state, child) {
               return IconButton(
                 icon: Icon(
-                  state.torchState == TorchState.on ? Icons.flash_on : Icons.flash_off,
+                  state.torchState == TorchState.on
+                      ? Icons.flash_on
+                      : Icons.flash_off,
                   color: AppColors.accent,
                 ),
                 onPressed: () => _cameraController.toggleTorch(),
@@ -114,15 +144,40 @@ class _ScanScreenState extends State<ScanScreen> {
               child: MobileScanner(
                 controller: _cameraController,
                 errorBuilder: (context, error, child) {
+                  // A camera error here almost always means the CAMERA
+                  // permission was denied (common on MIUI, which needs a manual
+                  // grant). Show a clear, actionable message + retry instead of
+                  // the misleading "Align QR Code" placeholder.
+                  final denied = error.errorCode ==
+                      MobileScannerErrorCode.permissionDenied;
                   return Container(
                     color: Colors.black,
-                    child: const Center(
+                    padding: const EdgeInsets.all(16),
+                    child: Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.qr_code_scanner_rounded, size: 48, color: AppColors.accent),
-                          SizedBox(height: 8),
-                          Text('Align QR Code', style: TextStyle(color: Colors.white, fontSize: 14)),
+                          Icon(
+                            denied
+                                ? Icons.no_photography_rounded
+                                : Icons.qr_code_scanner_rounded,
+                            size: 48,
+                            color: AppColors.accent,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            denied
+                                ? 'Camera permission is off.\nEnable it in Settings → Apps → GridShare → Permissions → Camera.'
+                                : 'Starting camera…',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 13),
+                          ),
+                          const SizedBox(height: 10),
+                          TextButton(
+                            onPressed: () => _cameraController.start(),
+                            child: const Text('Retry'),
+                          ),
                         ],
                       ),
                     ),
@@ -143,7 +198,8 @@ class _ScanScreenState extends State<ScanScreen> {
             width: 260,
             height: 260,
             decoration: BoxDecoration(
-              border: Border.all(color: AppColors.accent.withValues(alpha: 0.5), width: 2),
+              border: Border.all(
+                  color: AppColors.accent.withValues(alpha: 0.5), width: 2),
               borderRadius: BorderRadius.circular(AppSpacing.rLg),
             ),
           ),
@@ -201,7 +257,8 @@ class _SweepLine extends StatefulWidget {
   State<_SweepLine> createState() => _SweepLineState();
 }
 
-class _SweepLineState extends State<_SweepLine> with SingleTickerProviderStateMixin {
+class _SweepLineState extends State<_SweepLine>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1800),
