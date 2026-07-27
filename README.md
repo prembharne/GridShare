@@ -163,6 +163,7 @@ Key variables:
 | `RAZORPAY_KEY_SECRET`        | Razorpay secret (server-only)             | test key           |
 | `RAZORPAY_WEBHOOK_SECRET`    | HMAC secret for webhook verification      | –                  |
 | `STELLAR_RPC_URL`            | Soroban RPC endpoint                      | –                  |
+| `SOROBAN_CONTRACT_ID` | Soroban contract ID for GridShare escrow (mainnet) | `CAGOKMQMKALEIQFVVTQVLI7GLDC2PZDZGC2UZTZR4E3K74DDGWS3VZ7Q` |
 | `ADMIN_API_KEY`              | Guards `/admin/*` endpoints               | open in dev        |
 
 > **Never commit real secrets.** Set production keys as environment variables on
